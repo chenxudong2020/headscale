@@ -190,12 +190,14 @@ var codeStyleRegisterWebAPI = styles.Props{
 }
 
 type AuthProviderWeb struct {
-	serverURL string
+	serverURL   string
+	redirectURL string
 }
 
-func NewAuthProviderWeb(serverURL string) *AuthProviderWeb {
+func NewAuthProviderWeb(serverURL string, redirectURL string) *AuthProviderWeb {
 	return &AuthProviderWeb{
-		serverURL: serverURL,
+		serverURL:   serverURL,
+		redirectURL: redirectURL,
 	}
 }
 
@@ -211,7 +213,7 @@ func (a *AuthProviderWeb) AuthURL(registrationId types.RegistrationID) string {
 //
 // This is not part of the Tailscale control API, as we could send whatever URL
 // in the RegisterResponse.AuthURL field.
-func (h *Headscale) RegisterHandler(
+func (a *AuthProviderWeb) RegisterHandler(
 	writer http.ResponseWriter,
 	req *http.Request,
 ) {
@@ -228,7 +230,7 @@ func (h *Headscale) RegisterHandler(
 	}
 
 	// 获取 redirect_url 参数
-	redirectURL := h.cfg.RedirectURL
+	redirectURL := a.redirectURL
 	if redirectURL == "" {
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 		writer.WriteHeader(http.StatusOK)
