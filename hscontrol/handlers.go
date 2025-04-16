@@ -211,7 +211,7 @@ func (a *AuthProviderWeb) AuthURL(registrationId types.RegistrationID) string {
 //
 // This is not part of the Tailscale control API, as we could send whatever URL
 // in the RegisterResponse.AuthURL field.
-func (a *AuthProviderWeb) RegisterHandler(
+func (h *Headscale) RegisterHandler(
 	writer http.ResponseWriter,
 	req *http.Request,
 ) {
@@ -228,7 +228,7 @@ func (a *AuthProviderWeb) RegisterHandler(
 	}
 
 	// 获取 redirect_url 参数
-	redirectURL := req.URL.Query().Get("redirect_url")
+	redirectURL := h.cfg.RedirectURL
 	if redirectURL == "" {
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 		writer.WriteHeader(http.StatusOK)
@@ -243,7 +243,7 @@ func (a *AuthProviderWeb) RegisterHandler(
 	}
 
 	// 拼接新的重定向地址
-	target := fmt.Sprintf("%s/register/%s", redirectURL, registrationId)
+	target := fmt.Sprintf("%s/register/%s", strings.TrimRight(redirectURL, "/"), url.PathEscape(registrationIdStr))
 
 	// 执行重定向
 	http.Redirect(writer, req, target, http.StatusFound)
