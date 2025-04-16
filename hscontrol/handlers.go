@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -226,7 +227,24 @@ func (a *AuthProviderWeb) RegisterHandler(
 		return
 	}
 
-	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-	writer.WriteHeader(http.StatusOK)
-	writer.Write([]byte(templates.RegisterWeb(registrationId).Render()))
+	// 获取 redirect_url 参数
+	redirectURL := req.URL.Query().Get("redirect_url")
+	if redirectURL == "" {
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		writer.WriteHeader(http.StatusOK)
+		writer.Write([]byte(templates.RegisterWeb(registrationId).Render()))
+	}
+
+	// 验证 redirect_url 是否是一个有效的 URL
+	parsedURL, err := url.Parse(redirectURL)
+	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		http.Error(writer, "invalid redirect_url", http.StatusBadRequest)
+		return
+	}
+
+	// 拼接新的重定向地址
+	target := fmt.Sprintf("%s/register/%s", redirectURL, registrationId)
+
+	// 执行重定向
+	http.Redirect(writer, req, target, http.StatusFound)
 }
