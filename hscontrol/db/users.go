@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 
+	"strconv"
+	"strings"
+
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
 	"gorm.io/gorm"
@@ -217,4 +220,29 @@ func AssignNodeToUser(tx *gorm.DB, node *types.Node, uid types.UserID) error {
 	}
 
 	return nil
+}
+
+// GetAllowedRegionsForUser retrieves the allowed DERP regions for a given user.
+func GetAllowedRegionsForUser(tx *gorm.DB, uid types.UserID) ([]int, error) {
+	var user types.User
+	err := tx.First(&user, "id = ?", uid).Error
+	if err != nil {
+		return nil, err
+	}
+
+	// 将逗号分隔的字符串转换为整数列表
+	regions := []int{}
+	for _, region := range strings.Split(user.AllowedDERPRegions, ",") {
+		id, err := strconv.Atoi(region)
+		if err == nil {
+			regions = append(regions, id)
+		}
+	}
+	return regions, nil
+}
+
+func (hsdb *HSDatabase) GetAllowedRegionsForUser(uid types.UserID) ([]int, error) {
+	return Read(hsdb.DB, func(tx *gorm.DB) ([]int, error) {
+		return GetAllowedRegionsForUser(tx, uid)
+	})
 }

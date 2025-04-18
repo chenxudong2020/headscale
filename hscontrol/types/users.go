@@ -67,6 +67,8 @@ type User struct {
 	Provider string
 
 	ProfilePicURL string
+
+	AllowedDERPRegions string `gorm:"type:text"` // 新增字段，用于存储允许的 DERP 区域
 }
 
 func (u *User) StringID() string {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/juanfont/headscale/hscontrol/db"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/rs/zerolog/log"
@@ -35,12 +36,14 @@ type DERPServer struct {
 	key           key.NodePrivate
 	cfg           *types.DERPConfig
 	tailscaleDERP *derp.Server
+	db            *db.HSDatabase // 添加 HSDatabase 实例
 }
 
 func NewDERPServer(
 	serverURL string,
 	derpKey key.NodePrivate,
 	cfg *types.DERPConfig,
+	db *db.HSDatabase, // 接收 HSDatabase 实例
 ) (*DERPServer, error) {
 	log.Trace().Caller().Msg("Creating new embedded DERP server")
 	server := derp.NewServer(derpKey, util.TSLogfWrapper()) // nolint // zerolinter complains
@@ -50,6 +53,7 @@ func NewDERPServer(
 		key:           derpKey,
 		cfg:           cfg,
 		tailscaleDERP: server,
+		db:            db, // 存储 HSDatabase 实例
 	}, nil
 }
 
@@ -114,7 +118,51 @@ func (d *DERPServer) DERPHandler(
 	req *http.Request,
 ) {
 	log.Trace().Caller().Msgf("/derp request from %v", req.RemoteAddr)
+
+	// 定义一个结构体来解析 JSON 请求体
+	var requestBody struct {
+		UserID string `json:"userId"`
+	}
+
+	// 解析请求体
+	err := json.NewDecoder(req.Body).Decode(&requestBody)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to parse request body")
+		http.Error(writer, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// 获取 userID
+	userID := requestBody.UserID
+	if userID == "" {
+		log.Warn().Msg("Missing user ID in DERP request")
+		http.Error(writer, "User ID is required", http.StatusForbidden)
+		return
+	}
+
+	// 查询用户允许的 DERP 区域
+	allowedRegions, err := d.getAllowedRegionsForUser(userID)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get allowed regions for user")
+		http.Error(writer, "Failed to verify user permissions", http.StatusInternalServerError)
+		return
+	}
+
+	// 检查当前 DERP 区域是否被允许
+	requestedRegion := d.cfg.ServerRegionID // 假设当前服务器的区域 ID
+	if !isRegionAllowed(requestedRegion, allowedRegions) {
+		log.Warn().Msgf("User %s is not allowed to use region %d", userID, requestedRegion)
+		http.Error(writer, "Access to this DERP region is not allowed", http.StatusForbidden)
+		return
+	}
+
+	// 继续处理 WebSocket 或 Plain DERP 请求
 	upgrade := strings.ToLower(req.Header.Get("Upgrade"))
+	if strings.Contains(req.Header.Get("Sec-Websocket-Protocol"), "derp") {
+		d.serveWebsocket(writer, req)
+	} else {
+		d.servePlain(writer, req)
+	}
 
 	if upgrade != "websocket" && upgrade != "derp" {
 		if upgrade != "" {
@@ -359,4 +407,26 @@ func serverSTUNListener(ctx context.Context, packetConn *net.UDPConn) {
 			continue
 		}
 	}
+}
+
+func (d *DERPServer) getAllowedRegionsForUser(userID string) ([]int, error) {
+	uid, err := strconv.Atoi(userID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid user ID: %s", userID)
+	}
+
+	return d.db.GetAllowedRegionsForUser(types.UserID(uid))
+}
+
+func isRegionAllowed(requestedRegion int, allowedRegions []int) bool {
+	// 如果 requestedRegion 在 1 到 50 之间，这个范围是官方的regionId范围直接返回 true
+	if requestedRegion >= 1 && requestedRegion <= 50 {
+		return true
+	}
+	for _, region := range allowedRegions {
+		if region == requestedRegion {
+			return true
+		}
+	}
+	return false
 }
