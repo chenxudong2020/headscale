@@ -230,6 +230,7 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 			cfg.ServerURL,
 			key.NodePrivate(*derpServerKey),
 			&cfg.DERP,
+			app.db,
 		)
 		if err != nil {
 			return nil, err
