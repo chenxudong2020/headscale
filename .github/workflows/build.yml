@@ -95,3 +95,10 @@ jobs:
         with:
           name: "headscale-${{ matrix.env }}"
           path: "headscale"
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: headscale/*
+        env:
+            GITHUB_TOKEN: ${{ secrets.DUBUX }}
