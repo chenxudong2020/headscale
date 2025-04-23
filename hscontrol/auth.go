@@ -20,7 +20,7 @@ import (
 )
 
 type AuthProvider interface {
-	RegisterHandler(http.ResponseWriter, *http.Request)
+	WebRegisterHandler(http.ResponseWriter, *http.Request)
 	AuthURL(types.RegistrationID) string
 }
 

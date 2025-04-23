@@ -129,7 +129,7 @@ func (a *AuthProviderOIDC) determineNodeExpiry(idTokenExpiration time.Time) time
 // RegisterOIDC redirects to the OIDC provider for authentication
 // Puts NodeKey in cache so the callback can retrieve it using the oidc state param
 // Listens in /register/:registration_id.
-func (a *AuthProviderOIDC) RegisterHandler(
+func (a *AuthProviderOIDC) WebRegisterHandler(
 	writer http.ResponseWriter,
 	req *http.Request,
 ) {
