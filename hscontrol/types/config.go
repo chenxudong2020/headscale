@@ -53,6 +53,7 @@ const (
 // Config contains the initial Headscale configuration.
 type Config struct {
 	ServerURL                      string
+	TargetURL                      string
 	Addr                           string
 	MetricsAddr                    string
 	GRPCAddr                       string
@@ -893,6 +894,7 @@ func LoadServerConfig() (*Config, error) {
 
 	return &Config{
 		ServerURL:          serverURL,
+		TargetURL:          viper.GetString("target_url"),
 		Addr:               viper.GetString("listen_addr"),
 		MetricsAddr:        viper.GetString("metrics_listen_addr"),
 		GRPCAddr:           viper.GetString("grpc_listen_addr"),

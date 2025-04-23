@@ -190,6 +190,15 @@ var codeStyleRegisterWebAPI = styles.Props{
 
 type AuthProviderWeb struct {
 	serverURL string
+	targetURL string
+}
+
+// 设置targetURL和serverURL
+func NewAuthProviderWebWithTarget(serverURL string, targetURL string) *AuthProviderWeb {
+	return &AuthProviderWeb{
+		serverURL: serverURL,
+		targetURL: targetURL,
+	}
 }
 
 func NewAuthProviderWeb(serverURL string) *AuthProviderWeb {
