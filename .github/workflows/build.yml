@@ -95,11 +95,12 @@ jobs:
             echo "CURRENT_DATE=$(date +'%Y%m%d')" >> $GITHUB_ENV
 
       - name: Run go cross compile
-        run:  env ${{ matrix.env }} nix develop --command -- sh -c 'CGO_ENABLED=0 go build -o "headscale-${{ matrix.env }}" -ldflags="-s -w" ./cmd/headscale'
+        run:  env ${{ matrix.env }} nix develop --command -- sh -c 'CGO_ENABLED=0 go build -o "headscale" -ldflags="-s -w" ./cmd/headscale' && tar -czf "headscale-${{ matrix.env }}.tar.gz" headscale
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "${{ env.CURRENT_DATE }}_${{ github.ref_name }}"
-          files: headscale-*
+          files: headscale-*.tar.gz
         env:
             GITHUB_TOKEN: ${{ secrets.DUBUX }}
