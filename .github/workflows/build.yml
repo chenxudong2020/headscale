@@ -92,14 +92,14 @@ jobs:
       - name: Set CURRENT_DATE
         id: set-current-date
         run: |
-            echo "CURRENT_DATE=$(date +'%Y%m%d')" >> $GITHUB_ENV
+            echo "CURRENT_DATE_TIME=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
 
       - name: Run go cross compile
         run:  env ${{ matrix.env }} nix develop --command -- sh -c 'CGO_ENABLED=0 go build -o "headscale-${{ matrix.env }}" -ldflags="-s -w" ./cmd/headscale'
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "${{ env.CURRENT_DATE }}_${{ github.ref_name }}"
+          tag_name: "${{ env.CURRENT_DATE_TIME }}_${{ github.ref_name }}"
           files: headscale-*
         env:
             GITHUB_TOKEN: ${{ secrets.DUBUX }}
