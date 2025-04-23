@@ -467,7 +467,7 @@ func (h *Headscale) createRouter(grpcMux *grpcRuntime.ServeMux) *mux.Router {
 	router.HandleFunc(ts2021UpgradePath, h.NoiseUpgradeHandler).
 		Methods(http.MethodPost, http.MethodGet)
 
-	router.HandleFunc("/", h.AdminHandler).Methods(http.MethodGet)
+	router.HandleFunc("/admin", h.AdminHandler).Methods(http.MethodGet)
 	router.HandleFunc("/health", h.HealthHandler).Methods(http.MethodGet)
 	router.HandleFunc("/key", h.KeyHandler).Methods(http.MethodGet)
 	router.HandleFunc("/register/{registration_id}", h.authProvider.WebRegisterHandler).
