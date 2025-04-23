@@ -100,7 +100,7 @@ jobs:
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "${{ env.CURRENT_DATE }}_${{ github.ref_name }}"
-          files: ./*.tar.gz
+          tag_name: "${{ env.CURRENT_DATE }}_${{ github.ref_name }}"  
+          files: headscale-*
         env:
             GITHUB_TOKEN: ${{ secrets.DUBUX }}
