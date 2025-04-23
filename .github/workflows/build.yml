@@ -101,6 +101,6 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "${{ env.CURRENT_DATE }}_${{ github.ref_name }}"
-          files: headscale-*.tar.gz
+          files: ./*.tar.gz
         env:
             GITHUB_TOKEN: ${{ secrets.DUBUX }}
