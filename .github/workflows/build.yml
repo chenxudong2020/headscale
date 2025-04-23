@@ -95,11 +95,25 @@ jobs:
             echo "CURRENT_DATE_TIME=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
 
       - name: Run go cross compile
-        run:  env ${{ matrix.env }} nix develop --command -- sh -c 'CGO_ENABLED=0 go build -o "headscale-${{ matrix.env }}" -ldflags="-s -w" ./cmd/headscale'
+        run:  env ${{ matrix.env }} nix develop --command -- sh -c 'CGO_ENABLED=0 go build -o "headscale-${{ matrix.GOARCH }}-${{ matrix.GOOS }}${{ matrix.GOARM }}" -ldflags="-s -w" ./cmd/headscale'
+      - name: Upload artifact for each build
+        uses: actions/upload-artifact@v4
+        with:
+          name: headscale-${{ matrix.GOARCH }}-${{ matrix.GOOS }}${{ matrix.GOARM }}
+          path: headscale-${{ matrix.GOARCH }}-${{ matrix.GOOS }}${{ matrix.GOARM }}
+  upload-release-assets:
+    needs: build-cross
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: .
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "${{ env.CURRENT_DATE_TIME }}_${{ github.ref_name }}"
-          files: headscale-*
+          tag_name: "${{ needs.build-cross.outputs.CURRENT_DATE_TIME }}"
+          files: '**/*'
         env:
-            GITHUB_TOKEN: ${{ secrets.DUBUX }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
