@@ -60,7 +60,7 @@ func NewHeadscaleDatabase(
 		return nil, err
 	}
 
-	migrations := gormigrate.New(
+	gormigrate.New(
 		dbConn,
 		gormigrate.DefaultOptions,
 		[]*gormigrate.Migration{
