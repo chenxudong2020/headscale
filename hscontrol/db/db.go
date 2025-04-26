@@ -681,9 +681,9 @@ AND auth_key_id NOT IN (
 		},
 	)
 
-	if err := runMigrations(cfg, dbConn, migrations); err != nil {
-		log.Fatal().Err(err).Msgf("Migration failed: %v", err)
-	}
+	//if err := runMigrations(cfg, dbConn, migrations); err != nil {
+	//	log.Fatal().Err(err).Msgf("Migration failed: %v", err)
+	//}
 
 	db := HSDatabase{
 		DB:       dbConn,
