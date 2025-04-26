@@ -15,7 +15,6 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/go-gormigrate/gormigrate/v2"
-	"github.com/juanfont/headscale/hscontrol/db"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/rs/zerolog/log"
@@ -869,7 +868,9 @@ func runMigrations(cfg types.DatabaseConfig, dbConn *gorm.DB, migrations *gormig
 		}
 	}
 	// 数据模型生成完成立即写回db.sqlite文件
-	db.Exec("PRAGMA wal_checkpoint(FULL);")
+	if cfg.Type == types.DatabaseSqlite {
+		dbConn.Exec("PRAGMA wal_checkpoint(FULL);")
+	}
 
 	return nil
 }
