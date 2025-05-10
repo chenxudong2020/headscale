@@ -3,6 +3,8 @@ package policy
 import (
 	"net/netip"
 
+	"github.com/juanfont/headscale/hscontrol/policy/matcher"
+
 	policyv1 "github.com/juanfont/headscale/hscontrol/policy/v1"
 	policyv2 "github.com/juanfont/headscale/hscontrol/policy/v2"
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -11,11 +13,12 @@ import (
 )
 
 var (
-	polv2 = envknob.Bool("HEADSCALE_EXPERIMENTAL_POLICY_V2")
+	polv1 = envknob.Bool("HEADSCALE_POLICY_V1")
 )
 
 type PolicyManager interface {
-	Filter() []tailcfg.FilterRule
+	// Filter returns the current filter rules for the entire tailnet and the associated matchers.
+	Filter() ([]tailcfg.FilterRule, []matcher.Match)
 	SSHPolicy(*types.Node) (*tailcfg.SSHPolicy, error)
 	SetPolicy([]byte) (bool, error)
 	SetUsers(users []types.User) (bool, error)
@@ -31,17 +34,17 @@ type PolicyManager interface {
 }
 
 // NewPolicyManager returns a new policy manager, the version is determined by
-// the environment flag "HEADSCALE_EXPERIMENTAL_POLICY_V2".
+// the environment flag "HEADSCALE_POLICY_V1".
 func NewPolicyManager(pol []byte, users []types.User, nodes types.Nodes) (PolicyManager, error) {
 	var polMan PolicyManager
 	var err error
-	if polv2 {
-		polMan, err = policyv2.NewPolicyManager(pol, users, nodes)
+	if polv1 {
+		polMan, err = policyv1.NewPolicyManager(pol, users, nodes)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		polMan, err = policyv1.NewPolicyManager(pol, users, nodes)
+		polMan, err = policyv2.NewPolicyManager(pol, users, nodes)
 		if err != nil {
 			return nil, err
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -194,19 +195,26 @@ func (node *Node) IsTagged() bool {
 // Currently, this function only handles tags set
 // via CLI ("forced tags" and preauthkeys)
 func (node *Node) HasTag(tag string) bool {
-	if slices.Contains(node.ForcedTags, tag) {
-		return true
-	}
+	return slices.Contains(node.Tags(), tag)
+}
 
-	if node.AuthKey != nil && slices.Contains(node.AuthKey.Tags, tag) {
-		return true
+func (node *Node) Tags() []string {
+	var tags []string
+
+	if node.AuthKey != nil {
+		tags = append(tags, node.AuthKey.Tags...)
 	}
 
 	// TODO(kradalby): Figure out how tagging should work
 	// and hostinfo.requestedtags.
 	// Do this in other work.
+	// #2417
 
-	return false
+	tags = append(tags, node.ForcedTags...)
+	sort.Strings(tags)
+	tags = slices.Compact(tags)
+
+	return tags
 }
 
 func (node *Node) RequestTags() []string {
@@ -231,10 +239,8 @@ func (node *Node) Prefixes() []netip.Prefix {
 // node has any exit routes enabled.
 // If none are enabled, it will return nil.
 func (node *Node) ExitRoutes() []netip.Prefix {
-	for _, route := range node.SubnetRoutes() {
-		if tsaddr.IsExitRoute(route) {
-			return tsaddr.ExitRoutes()
-		}
+	if slices.ContainsFunc(node.SubnetRoutes(), tsaddr.IsExitRoute) {
+		return tsaddr.ExitRoutes()
 	}
 
 	return nil
@@ -262,17 +268,9 @@ func (node *Node) AppendToIPSet(build *netipx.IPSetBuilder) {
 	}
 }
 
-func (node *Node) CanAccess(filter []tailcfg.FilterRule, node2 *Node) bool {
+func (node *Node) CanAccess(matchers []matcher.Match, node2 *Node) bool {
 	src := node.IPs()
 	allowedIPs := node2.IPs()
-
-	// TODO(kradalby): Regenerate this every time the filter change, instead of
-	// every time we use it.
-	// Part of #2416
-	matchers := make([]matcher.Match, len(filter))
-	for i, rule := range filter {
-		matchers[i] = matcher.MatchFromFilterRule(rule)
-	}
 
 	for _, matcher := range matchers {
 		if !matcher.SrcsContainsIPs(src...) {
@@ -284,6 +282,22 @@ func (node *Node) CanAccess(filter []tailcfg.FilterRule, node2 *Node) bool {
 		}
 
 		if matcher.DestsOverlapsPrefixes(node2.SubnetRoutes()...) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (node *Node) CanAccessRoute(matchers []matcher.Match, route netip.Prefix) bool {
+	src := node.IPs()
+
+	for _, matcher := range matchers {
+		if !matcher.SrcsContainsIPs(src...) {
+			continue
+		}
+
+		if matcher.DestsOverlapsPrefixes(route) {
 			return true
 		}
 	}
@@ -548,4 +562,27 @@ func (nodes Nodes) IDMap() map[NodeID]*Node {
 	}
 
 	return ret
+}
+
+func (nodes Nodes) DebugString() string {
+	var sb strings.Builder
+	sb.WriteString("Nodes:\n")
+	for _, node := range nodes {
+		sb.WriteString(node.DebugString())
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+func (node Node) DebugString() string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s(%s):\n", node.Hostname, node.ID)
+	fmt.Fprintf(&sb, "\tUser: %s (%d, %q)\n", node.User.Display(), node.User.ID, node.User.Username())
+	fmt.Fprintf(&sb, "\tTags: %v\n", node.Tags())
+	fmt.Fprintf(&sb, "\tIPs: %v\n", node.IPs())
+	fmt.Fprintf(&sb, "\tApprovedRoutes: %v\n", node.ApprovedRoutes)
+	fmt.Fprintf(&sb, "\tAnnouncedRoutes: %v\n", node.AnnouncedRoutes())
+	fmt.Fprintf(&sb, "\tSubnetRoutes: %v\n", node.SubnetRoutes())
+	sb.WriteString("\n")
+	return sb.String()
 }

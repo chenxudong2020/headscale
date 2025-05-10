@@ -2,6 +2,7 @@ package hscontrol
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	_ "embed"
 	"errors"
@@ -280,14 +281,28 @@ func (a *AuthProviderOIDC) OIDCCallbackHandler(
 		return
 	}
 
-	// If EmailVerified is missing, we can try to get it from UserInfo
-	if !claims.EmailVerified {
-		var userinfo *oidc.UserInfo
-		userinfo, err = a.oidcProvider.UserInfo(req.Context(), oauth2.StaticTokenSource(oauth2Token))
-		if err != nil {
-			util.LogErr(err, "could not get userinfo; email cannot be verified")
+	var userinfo *oidc.UserInfo
+	userinfo, err = a.oidcProvider.UserInfo(req.Context(), oauth2.StaticTokenSource(oauth2Token))
+	if err != nil {
+		util.LogErr(err, "could not get userinfo; only checking claim")
+	}
+
+	// If the userinfo is available, we can check if the subject matches the
+	// claims, then use some of the userinfo fields to update the user.
+	// https://openid.net/specs/openid-connect-core-1_0.html#UserInfo
+	if userinfo != nil && userinfo.Subject == claims.Sub {
+		claims.Email = cmp.Or(claims.Email, userinfo.Email)
+		claims.EmailVerified = cmp.Or(claims.EmailVerified, types.FlexibleBoolean(userinfo.EmailVerified))
+
+		// The userinfo has some extra fields that we can use to update the user but they are only
+		// available in the underlying claims struct.
+		// TODO(kradalby): there might be more interesting fields here that we have not found yet.
+		var userinfo2 types.OIDCUserInfo
+		if err := userinfo.Claims(&userinfo2); err == nil {
+			claims.Username = cmp.Or(claims.Username, userinfo2.PreferredUsername)
+			claims.Name = cmp.Or(claims.Name, userinfo2.Name)
+			claims.ProfilePictureURL = cmp.Or(claims.ProfilePictureURL, userinfo2.Picture)
 		}
-		claims.EmailVerified = types.FlexibleBoolean(userinfo.EmailVerified)
 	}
 
 	user, err := a.createOrUpdateUserFromClaim(&claims)
@@ -513,7 +528,23 @@ func (a *AuthProviderOIDC) handleRegistration(
 		return false, fmt.Errorf("updating resources using node: %w", err)
 	}
 
-	if !updateSent {
+	// This is a bit of a back and forth, but we have a bit of a chicken and egg
+	// dependency here.
+	// Because the way the policy manager works, we need to have the node
+	// in the database, then add it to the policy manager and then we can
+	// approve the route. This means we get this dance where the node is
+	// first added to the database, then we add it to the policy manager via
+	// nodesChangedHook and then we can auto approve the routes.
+	// As that only approves the struct object, we need to save it again and
+	// ensure we send an update.
+	// This works, but might be another good candidate for doing some sort of
+	// eventbus.
+	routesChanged := policy.AutoApproveRoutes(a.polMan, node)
+	if err := a.db.DB.Save(node).Error; err != nil {
+		return false, fmt.Errorf("saving auto approved routes to node: %w", err)
+	}
+
+	if !updateSent || routesChanged {
 		ctx := types.NotifyCtx(context.Background(), "oidc-expiry-self", node.Hostname)
 		a.notifier.NotifyByNodeID(
 			ctx,

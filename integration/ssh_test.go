@@ -172,7 +172,7 @@ func TestSSHMultipleUsersAllToAll(t *testing.T) {
 				{
 					Action:       "accept",
 					Sources:      []string{"group:integration-test"},
-					Destinations: []string{"group:integration-test"},
+					Destinations: []string{"user1@", "user2@"},
 					Users:        []string{"ssh-it-user"},
 				},
 			},
@@ -267,7 +267,7 @@ func TestSSHIsBlockedInACL(t *testing.T) {
 				{
 					Action:       "accept",
 					Sources:      []string{"group:integration-test"},
-					Destinations: []string{"group:integration-test"},
+					Destinations: []string{"user1@"},
 					Users:        []string{"ssh-it-user"},
 				},
 			},
@@ -317,13 +317,13 @@ func TestSSHUserOnlyIsolation(t *testing.T) {
 				{
 					Action:       "accept",
 					Sources:      []string{"group:ssh1"},
-					Destinations: []string{"group:ssh1"},
+					Destinations: []string{"user1@"},
 					Users:        []string{"ssh-it-user"},
 				},
 				{
 					Action:       "accept",
 					Sources:      []string{"group:ssh2"},
-					Destinations: []string{"group:ssh2"},
+					Destinations: []string{"user2@"},
 					Users:        []string{"ssh-it-user"},
 				},
 			},
@@ -410,7 +410,7 @@ func assertSSHHostname(t *testing.T, client TailscaleClient, peer TailscaleClien
 	result, _, err := doSSH(t, client, peer)
 	assertNoErr(t, err)
 
-	assertContains(t, peer.ID(), strings.ReplaceAll(result, "\n", ""))
+	assertContains(t, peer.ContainerID(), strings.ReplaceAll(result, "\n", ""))
 }
 
 func assertSSHPermissionDenied(t *testing.T, client TailscaleClient, peer TailscaleClient) {

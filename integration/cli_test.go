@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -271,7 +272,7 @@ func TestPreAuthKeyCommand(t *testing.T) {
 				"headscale",
 				"preauthkeys",
 				"--user",
-				user,
+				"1",
 				"create",
 				"--reusable",
 				"--expiration",
@@ -297,7 +298,7 @@ func TestPreAuthKeyCommand(t *testing.T) {
 			"headscale",
 			"preauthkeys",
 			"--user",
-			user,
+			"1",
 			"list",
 			"--output",
 			"json",
@@ -311,8 +312,8 @@ func TestPreAuthKeyCommand(t *testing.T) {
 
 	assert.Equal(
 		t,
-		[]string{keys[0].GetId(), keys[1].GetId(), keys[2].GetId()},
-		[]string{
+		[]uint64{keys[0].GetId(), keys[1].GetId(), keys[2].GetId()},
+		[]uint64{
 			listedPreAuthKeys[1].GetId(),
 			listedPreAuthKeys[2].GetId(),
 			listedPreAuthKeys[3].GetId(),
@@ -354,7 +355,7 @@ func TestPreAuthKeyCommand(t *testing.T) {
 			"headscale",
 			"preauthkeys",
 			"--user",
-			user,
+			"1",
 			"expire",
 			listedPreAuthKeys[1].GetKey(),
 		},
@@ -368,7 +369,7 @@ func TestPreAuthKeyCommand(t *testing.T) {
 			"headscale",
 			"preauthkeys",
 			"--user",
-			user,
+			"1",
 			"list",
 			"--output",
 			"json",
@@ -408,7 +409,7 @@ func TestPreAuthKeyCommandWithoutExpiry(t *testing.T) {
 			"headscale",
 			"preauthkeys",
 			"--user",
-			user,
+			"1",
 			"create",
 			"--reusable",
 			"--output",
@@ -425,7 +426,7 @@ func TestPreAuthKeyCommandWithoutExpiry(t *testing.T) {
 			"headscale",
 			"preauthkeys",
 			"--user",
-			user,
+			"1",
 			"list",
 			"--output",
 			"json",
@@ -470,7 +471,7 @@ func TestPreAuthKeyCommandReusableEphemeral(t *testing.T) {
 			"headscale",
 			"preauthkeys",
 			"--user",
-			user,
+			"1",
 			"create",
 			"--reusable=true",
 			"--output",
@@ -487,7 +488,7 @@ func TestPreAuthKeyCommandReusableEphemeral(t *testing.T) {
 			"headscale",
 			"preauthkeys",
 			"--user",
-			user,
+			"1",
 			"create",
 			"--ephemeral=true",
 			"--output",
@@ -507,7 +508,7 @@ func TestPreAuthKeyCommandReusableEphemeral(t *testing.T) {
 			"headscale",
 			"preauthkeys",
 			"--user",
-			user,
+			"1",
 			"list",
 			"--output",
 			"json",
@@ -547,7 +548,7 @@ func TestPreAuthKeyCorrectUserLoggedInCommand(t *testing.T) {
 	headscale, err := scenario.Headscale()
 	assertNoErr(t, err)
 
-	err = headscale.CreateUser(user2)
+	u2, err := headscale.CreateUser(user2)
 	assertNoErr(t, err)
 
 	var user2Key v1.PreAuthKey
@@ -558,7 +559,7 @@ func TestPreAuthKeyCorrectUserLoggedInCommand(t *testing.T) {
 			"headscale",
 			"preauthkeys",
 			"--user",
-			user2,
+			strconv.FormatUint(u2.GetId(), 10),
 			"create",
 			"--reusable",
 			"--expiration",
@@ -1579,6 +1580,9 @@ func TestNodeMoveCommand(t *testing.T) {
 	// Randomly generated node key
 	regID := types.MustRegistrationID()
 
+	userMap, err := headscale.MapUsers()
+	assertNoErr(t, err)
+
 	_, err = headscale.Execute(
 		[]string{
 			"headscale",
@@ -1627,9 +1631,9 @@ func TestNodeMoveCommand(t *testing.T) {
 			"nodes",
 			"move",
 			"--identifier",
-			nodeID,
+			strconv.FormatUint(node.GetId(), 10),
 			"--user",
-			"new-user",
+			strconv.FormatUint(userMap["new-user"].GetId(), 10),
 			"--output",
 			"json",
 		},
@@ -1667,7 +1671,7 @@ func TestNodeMoveCommand(t *testing.T) {
 			"--identifier",
 			nodeID,
 			"--user",
-			"non-existing-user",
+			"999",
 			"--output",
 			"json",
 		},
@@ -1688,7 +1692,7 @@ func TestNodeMoveCommand(t *testing.T) {
 			"--identifier",
 			nodeID,
 			"--user",
-			"old-user",
+			strconv.FormatUint(userMap["old-user"].GetId(), 10),
 			"--output",
 			"json",
 		},
@@ -1707,7 +1711,7 @@ func TestNodeMoveCommand(t *testing.T) {
 			"--identifier",
 			nodeID,
 			"--user",
-			"old-user",
+			strconv.FormatUint(userMap["old-user"].GetId(), 10),
 			"--output",
 			"json",
 		},

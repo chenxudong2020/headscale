@@ -161,7 +161,7 @@ func (api headscaleV1APIServer) CreatePreAuthKey(
 		}
 	}
 
-	user, err := api.h.db.GetUserByName(request.GetUser())
+	user, err := api.h.db.GetUserByID(types.UserID(request.GetUser()))
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +190,7 @@ func (api headscaleV1APIServer) ExpirePreAuthKey(
 			return err
 		}
 
-		if preAuthKey.User.Name != request.GetUser() {
+		if uint64(preAuthKey.User.ID) != request.GetUser() {
 			return fmt.Errorf("preauth key does not belong to user")
 		}
 
@@ -207,7 +207,7 @@ func (api headscaleV1APIServer) ListPreAuthKeys(
 	ctx context.Context,
 	request *v1.ListPreAuthKeysRequest,
 ) (*v1.ListPreAuthKeysResponse, error) {
-	user, err := api.h.db.GetUserByName(request.GetUser())
+	user, err := api.h.db.GetUserByID(types.UserID(request.GetUser()))
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +268,24 @@ func (api headscaleV1APIServer) RegisterNode(
 	if err != nil {
 		return nil, fmt.Errorf("updating resources using node: %w", err)
 	}
-	if !updateSent {
+
+	// This is a bit of a back and forth, but we have a bit of a chicken and egg
+	// dependency here.
+	// Because the way the policy manager works, we need to have the node
+	// in the database, then add it to the policy manager and then we can
+	// approve the route. This means we get this dance where the node is
+	// first added to the database, then we add it to the policy manager via
+	// nodesChangedHook and then we can auto approve the routes.
+	// As that only approves the struct object, we need to save it again and
+	// ensure we send an update.
+	// This works, but might be another good candidate for doing some sort of
+	// eventbus.
+	routesChanged := policy.AutoApproveRoutes(api.h.polMan, node)
+	if err := api.h.db.DB.Save(node).Error; err != nil {
+		return nil, fmt.Errorf("saving auto approved routes to node: %w", err)
+	}
+
+	if !updateSent || routesChanged {
 		ctx = types.NotifyCtx(context.Background(), "web-node-login", node.Hostname)
 		api.h.nodeNotifier.NotifyAll(ctx, types.UpdatePeerChanged(node.ID))
 	}
@@ -547,21 +564,30 @@ func (api headscaleV1APIServer) MoveNode(
 	ctx context.Context,
 	request *v1.MoveNodeRequest,
 ) (*v1.MoveNodeResponse, error) {
-	// TODO(kradalby): This should be done in one tx.
-	node, err := api.h.db.GetNodeByID(types.NodeID(request.GetNodeId()))
+	node, err := db.Write(api.h.db.DB, func(tx *gorm.DB) (*types.Node, error) {
+		node, err := db.GetNodeByID(tx, types.NodeID(request.GetNodeId()))
+		if err != nil {
+			return nil, err
+		}
+
+		err = db.AssignNodeToUser(tx, node, types.UserID(request.GetUser()))
+		if err != nil {
+			return nil, err
+		}
+
+		return node, nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	user, err := api.h.db.GetUserByName(request.GetUser())
-	if err != nil {
-		return nil, err
-	}
-
-	err = api.h.db.AssignNodeToUser(node, types.UserID(user.ID))
-	if err != nil {
-		return nil, err
-	}
+	ctx = types.NotifyCtx(ctx, "cli-movenode-self", node.Hostname)
+	api.h.nodeNotifier.NotifyByNodeID(
+		ctx,
+		types.UpdateSelf(node.ID),
+		node.ID)
+	ctx = types.NotifyCtx(ctx, "cli-movenode", node.Hostname)
+	api.h.nodeNotifier.NotifyWithIgnore(ctx, types.UpdatePeerChanged(node.ID), node.ID)
 
 	return &v1.MoveNodeResponse{Node: node.Proto()}, nil
 }

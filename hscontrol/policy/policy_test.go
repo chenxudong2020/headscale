@@ -1,9 +1,13 @@
 package policy
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"testing"
+	"time"
+
+	"github.com/juanfont/headscale/hscontrol/policy/matcher"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -13,11 +17,17 @@ import (
 	"gorm.io/gorm"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
+	"tailscale.com/util/must"
 )
 
 var ap = func(ipStr string) *netip.Addr {
 	ip := netip.MustParseAddr(ipStr)
 	return &ip
+}
+
+var p = func(prefStr string) netip.Prefix {
+	ip := netip.MustParsePrefix(prefStr)
+	return ip
 }
 
 // hsExitNodeDestForTest is the list of destination IP ranges that are allowed when
@@ -699,6 +709,9 @@ func TestReduceFilterRules(t *testing.T) {
 			name: "1817-reduce-breaks-32-mask",
 			pol: `
 {
+  "tagOwners": {
+    "tag:access-servers": ["user100@"],
+  },
   "groups": {
     "group:access": [
       "user1@"
@@ -759,6 +772,54 @@ func TestReduceFilterRules(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "2365-only-route-policy",
+			pol: `
+{
+  "hosts": {
+    "router": "100.64.0.1/32",
+    "node": "100.64.0.2/32"
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": [
+        "*"
+      ],
+      "dst": [
+        "router:8000"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "node"
+      ],
+      "dst": [
+        "172.26.0.0/16:*"
+      ]
+    }
+  ],
+}
+`,
+			node: &types.Node{
+				IPv4: ap("100.64.0.2"),
+				IPv6: ap("fd7a:115c:a1e0::2"),
+				User: users[3],
+			},
+			peers: types.Nodes{
+				&types.Node{
+					IPv4: ap("100.64.0.1"),
+					IPv6: ap("fd7a:115c:a1e0::1"),
+					User: users[1],
+					Hostinfo: &tailcfg.Hostinfo{
+						RoutableIPs: []netip.Prefix{p("172.16.0.0/24"), p("10.10.11.0/24"), p("10.10.12.0/24")},
+					},
+					ApprovedRoutes: []netip.Prefix{p("172.16.0.0/24"), p("10.10.11.0/24"), p("10.10.12.0/24")},
+				},
+			},
+			want: []tailcfg.FilterRule{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -769,7 +830,8 @@ func TestReduceFilterRules(t *testing.T) {
 				var err error
 				pm, err = pmf(users, append(tt.peers, tt.node))
 				require.NoError(t, err)
-				got := pm.Filter()
+				got, _ := pm.Filter()
+				t.Logf("full filter:\n%s", must.Get(json.MarshalIndent(got, "", "  ")))
 				got = ReduceFilterRules(tt.node, got)
 
 				if diff := cmp.Diff(tt.want, got); diff != "" {
@@ -781,7 +843,7 @@ func TestReduceFilterRules(t *testing.T) {
 	}
 }
 
-func TestFilterNodesByACL(t *testing.T) {
+func TestReduceNodes(t *testing.T) {
 	type args struct {
 		nodes types.Nodes
 		rules []tailcfg.FilterRule
@@ -1369,7 +1431,6 @@ func TestFilterNodesByACL(t *testing.T) {
 				},
 			},
 		},
-
 		{
 			name: "subnet-router-with-only-route",
 			args: args{
@@ -1421,17 +1482,993 @@ func TestFilterNodesByACL(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "subnet-router-with-only-route-smaller-mask-2181",
+			args: args{
+				nodes: []*types.Node{
+					{
+						ID:       1,
+						IPv4:     ap("100.64.0.1"),
+						Hostname: "router",
+						User:     types.User{Name: "router"},
+						Hostinfo: &tailcfg.Hostinfo{
+							RoutableIPs: []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")},
+						},
+						ApprovedRoutes: []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")},
+					},
+					{
+						ID:       2,
+						IPv4:     ap("100.64.0.2"),
+						Hostname: "node",
+						User:     types.User{Name: "node"},
+					},
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{
+							"100.64.0.2/32",
+						},
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.99.0.2/32", Ports: tailcfg.PortRangeAny},
+						},
+					},
+				},
+				node: &types.Node{
+					ID:       1,
+					IPv4:     ap("100.64.0.1"),
+					Hostname: "router",
+					User:     types.User{Name: "router"},
+					Hostinfo: &tailcfg.Hostinfo{
+						RoutableIPs: []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")},
+					},
+					ApprovedRoutes: []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")},
+				},
+			},
+			want: []*types.Node{
+				{
+					ID:       2,
+					IPv4:     ap("100.64.0.2"),
+					Hostname: "node",
+					User:     types.User{Name: "node"},
+				},
+			},
+		},
+		{
+			name: "node-to-subnet-router-with-only-route-smaller-mask-2181",
+			args: args{
+				nodes: []*types.Node{
+					{
+						ID:       1,
+						IPv4:     ap("100.64.0.1"),
+						Hostname: "router",
+						User:     types.User{Name: "router"},
+						Hostinfo: &tailcfg.Hostinfo{
+							RoutableIPs: []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")},
+						},
+						ApprovedRoutes: []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")},
+					},
+					{
+						ID:       2,
+						IPv4:     ap("100.64.0.2"),
+						Hostname: "node",
+						User:     types.User{Name: "node"},
+					},
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{
+							"100.64.0.2/32",
+						},
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.99.0.2/32", Ports: tailcfg.PortRangeAny},
+						},
+					},
+				},
+				node: &types.Node{
+					ID:       2,
+					IPv4:     ap("100.64.0.2"),
+					Hostname: "node",
+					User:     types.User{Name: "node"},
+				},
+			},
+			want: []*types.Node{
+				{
+					ID:       1,
+					IPv4:     ap("100.64.0.1"),
+					Hostname: "router",
+					User:     types.User{Name: "router"},
+					Hostinfo: &tailcfg.Hostinfo{
+						RoutableIPs: []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")},
+					},
+					ApprovedRoutes: []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := FilterNodesByACL(
+			matchers := matcher.MatchesFromFilterRules(tt.args.rules)
+			got := ReduceNodes(
 				tt.args.node,
 				tt.args.nodes,
-				tt.args.rules,
+				matchers,
 			)
 			if diff := cmp.Diff(tt.want, got, util.Comparers...); diff != "" {
 				t.Errorf("FilterNodesByACL() unexpected result (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestSSHPolicyRules(t *testing.T) {
+	users := []types.User{
+		{Name: "user1", Model: gorm.Model{ID: 1}},
+		{Name: "user2", Model: gorm.Model{ID: 2}},
+		{Name: "user3", Model: gorm.Model{ID: 3}},
+	}
+
+	// Create standard node setups used across tests
+	nodeUser1 := types.Node{
+		Hostname: "user1-device",
+		IPv4:     ap("100.64.0.1"),
+		UserID:   1,
+		User:     users[0],
+	}
+	nodeUser2 := types.Node{
+		Hostname: "user2-device",
+		IPv4:     ap("100.64.0.2"),
+		UserID:   2,
+		User:     users[1],
+	}
+	taggedServer := types.Node{
+		Hostname:   "tagged-server",
+		IPv4:       ap("100.64.0.3"),
+		UserID:     3,
+		User:       users[2],
+		ForcedTags: []string{"tag:server"},
+	}
+	taggedClient := types.Node{
+		Hostname:   "tagged-client",
+		IPv4:       ap("100.64.0.4"),
+		UserID:     2,
+		User:       users[1],
+		ForcedTags: []string{"tag:client"},
+	}
+
+	tests := []struct {
+		name         string
+		targetNode   types.Node
+		peers        types.Nodes
+		policy       string
+		wantSSH      *tailcfg.SSHPolicy
+		expectErr    bool
+		errorMessage string
+
+		// There are some tests that will not pass on V1 since we do not
+		// have the same kind of error handling as V2, so we skip them.
+		skipV1 bool
+	}{
+		{
+			name:       "group-to-user",
+			targetNode: nodeUser1,
+			peers:      types.Nodes{&nodeUser2},
+			policy: `{
+				"groups": {
+					"group:admins": ["user2@"]
+				},
+				"ssh": [
+					{
+						"action": "accept",
+						"src": ["group:admins"],
+						"dst": ["user1@"],
+						"users": ["autogroup:nonroot"]
+					}
+				]
+			}`,
+			wantSSH: &tailcfg.SSHPolicy{Rules: []*tailcfg.SSHRule{
+				{
+					Principals: []*tailcfg.SSHPrincipal{
+						{NodeIP: "100.64.0.2"},
+					},
+					SSHUsers: map[string]string{
+						"autogroup:nonroot": "=",
+					},
+					Action: &tailcfg.SSHAction{
+						Accept:                   true,
+						AllowAgentForwarding:     true,
+						AllowLocalPortForwarding: true,
+					},
+				},
+			}},
+
+			// It looks like the group implementation in v1 is broken, so
+			// we skip this test for v1 and not let it hold up v2 replacing it.
+			skipV1: true,
+		},
+		{
+			name:       "group-to-tag",
+			targetNode: taggedServer,
+			peers:      types.Nodes{&nodeUser1, &nodeUser2},
+			policy: `{
+				"tagOwners": {
+				  "tag:server": ["user3@"],
+				},
+				"groups": {
+					"group:users": ["user1@", "user2@"]
+				},
+				"ssh": [
+					{
+						"action": "accept",
+						"src": ["group:users"],
+						"dst": ["tag:server"],
+						"users": ["autogroup:nonroot"]
+					}
+				]
+			}`,
+			wantSSH: &tailcfg.SSHPolicy{Rules: []*tailcfg.SSHRule{
+				{
+					Principals: []*tailcfg.SSHPrincipal{
+						{NodeIP: "100.64.0.1"},
+						{NodeIP: "100.64.0.2"},
+					},
+					SSHUsers: map[string]string{
+						"autogroup:nonroot": "=",
+					},
+					Action: &tailcfg.SSHAction{
+						Accept:                   true,
+						AllowAgentForwarding:     true,
+						AllowLocalPortForwarding: true,
+					},
+				},
+			}},
+
+			// It looks like the group implementation in v1 is broken, so
+			// we skip this test for v1 and not let it hold up v2 replacing it.
+			skipV1: true,
+		},
+		{
+			name:       "tag-to-user",
+			targetNode: nodeUser1,
+			peers:      types.Nodes{&taggedClient},
+			policy: `{
+			    "tagOwners": {
+					"tag:client": ["user1@"],
+				},
+				"ssh": [
+					{
+						"action": "accept",
+						"src": ["tag:client"],
+						"dst": ["user1@"],
+						"users": ["autogroup:nonroot"]
+					}
+				]
+			}`,
+			wantSSH: &tailcfg.SSHPolicy{Rules: []*tailcfg.SSHRule{
+				{
+					Principals: []*tailcfg.SSHPrincipal{
+						{NodeIP: "100.64.0.4"},
+					},
+					SSHUsers: map[string]string{
+						"autogroup:nonroot": "=",
+					},
+					Action: &tailcfg.SSHAction{
+						Accept:                   true,
+						AllowAgentForwarding:     true,
+						AllowLocalPortForwarding: true,
+					},
+				},
+			}},
+		},
+		{
+			name:       "tag-to-tag",
+			targetNode: taggedServer,
+			peers:      types.Nodes{&taggedClient},
+			policy: `{
+				"tagOwners": {
+					"tag:client": ["user2@"],
+					"tag:server": ["user3@"],
+				},
+				"ssh": [
+					{
+						"action": "accept",
+						"src": ["tag:client"],
+						"dst": ["tag:server"],
+						"users": ["autogroup:nonroot"]
+					}
+				]
+			}`,
+			wantSSH: &tailcfg.SSHPolicy{Rules: []*tailcfg.SSHRule{
+				{
+					Principals: []*tailcfg.SSHPrincipal{
+						{NodeIP: "100.64.0.4"},
+					},
+					SSHUsers: map[string]string{
+						"autogroup:nonroot": "=",
+					},
+					Action: &tailcfg.SSHAction{
+						Accept:                   true,
+						AllowAgentForwarding:     true,
+						AllowLocalPortForwarding: true,
+					},
+				},
+			}},
+		},
+		{
+			name:       "group-to-wildcard",
+			targetNode: nodeUser1,
+			peers:      types.Nodes{&nodeUser2, &taggedClient},
+			policy: `{
+				"groups": {
+					"group:admins": ["user2@"]
+				},
+				"ssh": [
+					{
+						"action": "accept",
+						"src": ["group:admins"],
+						"dst": ["*"],
+						"users": ["autogroup:nonroot"]
+					}
+				]
+			}`,
+			wantSSH: &tailcfg.SSHPolicy{Rules: []*tailcfg.SSHRule{
+				{
+					Principals: []*tailcfg.SSHPrincipal{
+						{NodeIP: "100.64.0.2"},
+					},
+					SSHUsers: map[string]string{
+						"autogroup:nonroot": "=",
+					},
+					Action: &tailcfg.SSHAction{
+						Accept:                   true,
+						AllowAgentForwarding:     true,
+						AllowLocalPortForwarding: true,
+					},
+				},
+			}},
+
+			// It looks like the group implementation in v1 is broken, so
+			// we skip this test for v1 and not let it hold up v2 replacing it.
+			skipV1: true,
+		},
+		{
+			name:       "check-period-specified",
+			targetNode: nodeUser1,
+			peers:      types.Nodes{&taggedClient},
+			policy: `{
+				"tagOwners": {
+					"tag:client": ["user1@"],
+				},
+				"ssh": [
+					{
+						"action": "check",
+						"checkPeriod": "24h",
+						"src": ["tag:client"],
+						"dst": ["user1@"],
+						"users": ["autogroup:nonroot"]
+					}
+				]
+			}`,
+			wantSSH: &tailcfg.SSHPolicy{Rules: []*tailcfg.SSHRule{
+				{
+					Principals: []*tailcfg.SSHPrincipal{
+						{NodeIP: "100.64.0.4"},
+					},
+					SSHUsers: map[string]string{
+						"autogroup:nonroot": "=",
+					},
+					Action: &tailcfg.SSHAction{
+						Accept:                   true,
+						SessionDuration:          24 * time.Hour,
+						AllowAgentForwarding:     true,
+						AllowLocalPortForwarding: true,
+					},
+				},
+			}},
+		},
+		{
+			name:       "no-matching-rules",
+			targetNode: nodeUser2,
+			peers:      types.Nodes{&nodeUser1},
+			policy: `{
+			    "tagOwners": {
+			    	"tag:client": ["user1@"],
+			    },
+				"ssh": [
+					{
+						"action": "accept",
+						"src": ["tag:client"],
+						"dst": ["user1@"],
+						"users": ["autogroup:nonroot"]
+					}
+				]
+			}`,
+			wantSSH: &tailcfg.SSHPolicy{Rules: nil},
+		},
+		{
+			name:       "invalid-action",
+			targetNode: nodeUser1,
+			peers:      types.Nodes{&nodeUser2},
+			policy: `{
+				"ssh": [
+					{
+						"action": "invalid",
+						"src": ["group:admins"],
+						"dst": ["user1@"],
+						"users": ["autogroup:nonroot"]
+					}
+				]
+			}`,
+			expectErr:    true,
+			errorMessage: `SSH action "invalid" is not valid, must be accept or check`,
+			skipV1:       true,
+		},
+		{
+			name:       "invalid-check-period",
+			targetNode: nodeUser1,
+			peers:      types.Nodes{&nodeUser2},
+			policy: `{
+				"ssh": [
+					{
+						"action": "check",
+						"checkPeriod": "invalid",
+						"src": ["group:admins"],
+						"dst": ["user1@"],
+						"users": ["autogroup:nonroot"]
+					}
+				]
+			}`,
+			expectErr:    true,
+			errorMessage: "not a valid duration string",
+			skipV1:       true,
+		},
+		{
+			name:       "multiple-ssh-users-with-autogroup",
+			targetNode: nodeUser1,
+			peers:      types.Nodes{&taggedClient},
+			policy: `{
+			"tagOwners": {
+				"tag:client": ["user1@"],
+			},
+        	"ssh": [
+        	    {
+        	        "action": "accept",
+        	        "src": ["tag:client"],
+        	        "dst": ["user1@"],
+        	        "users": ["alice", "bob"]
+        	    }
+        	]
+    }`,
+			wantSSH: &tailcfg.SSHPolicy{Rules: []*tailcfg.SSHRule{
+				{
+					Principals: []*tailcfg.SSHPrincipal{
+						{NodeIP: "100.64.0.4"},
+					},
+					SSHUsers: map[string]string{
+						"alice": "=",
+						"bob":   "=",
+					},
+					Action: &tailcfg.SSHAction{
+						Accept:                   true,
+						AllowAgentForwarding:     true,
+						AllowLocalPortForwarding: true,
+					},
+				},
+			}},
+		},
+		{
+			name:       "unsupported-autogroup",
+			targetNode: nodeUser1,
+			peers:      types.Nodes{&taggedClient},
+			policy: `{
+        "ssh": [
+            {
+                "action": "accept",
+                "src": ["tag:client"],
+                "dst": ["user1@"],
+                "users": ["autogroup:invalid"]
+            }
+        ]
+    }`,
+			expectErr:    true,
+			errorMessage: "autogroup \"autogroup:invalid\" is not supported",
+			skipV1:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		for idx, pmf := range PolicyManagerFuncsForTest([]byte(tt.policy)) {
+			version := idx + 1
+			t.Run(fmt.Sprintf("%s-v%d", tt.name, version), func(t *testing.T) {
+				if version == 1 && tt.skipV1 {
+					t.Skip()
+				}
+
+				var pm PolicyManager
+				var err error
+				pm, err = pmf(users, append(tt.peers, &tt.targetNode))
+
+				if tt.expectErr {
+					require.Error(t, err)
+					require.Contains(t, err.Error(), tt.errorMessage)
+					return
+				}
+
+				require.NoError(t, err)
+
+				got, err := pm.SSHPolicy(&tt.targetNode)
+				require.NoError(t, err)
+
+				if diff := cmp.Diff(tt.wantSSH, got); diff != "" {
+					t.Errorf("SSHPolicy() unexpected result (-want +got):\n%s", diff)
+				}
+			})
+		}
+	}
+}
+func TestReduceRoutes(t *testing.T) {
+	type args struct {
+		node   *types.Node
+		routes []netip.Prefix
+		rules  []tailcfg.FilterRule
+	}
+	tests := []struct {
+		name string
+		args args
+		want []netip.Prefix
+	}{
+		{
+			name: "node-can-access-all-routes",
+			args: args{
+				node: &types.Node{
+					ID:   1,
+					IPv4: ap("100.64.0.1"),
+					User: types.User{Name: "user1"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.0.0.0/24"),
+					netip.MustParsePrefix("192.168.1.0/24"),
+					netip.MustParsePrefix("172.16.0.0/16"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"100.64.0.1"},
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "*"},
+						},
+					},
+				},
+			},
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.0.0.0/24"),
+				netip.MustParsePrefix("192.168.1.0/24"),
+				netip.MustParsePrefix("172.16.0.0/16"),
+			},
+		},
+		{
+			name: "node-can-access-specific-route",
+			args: args{
+				node: &types.Node{
+					ID:   1,
+					IPv4: ap("100.64.0.1"),
+					User: types.User{Name: "user1"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.0.0.0/24"),
+					netip.MustParsePrefix("192.168.1.0/24"),
+					netip.MustParsePrefix("172.16.0.0/16"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"100.64.0.1"},
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.0.0.0/24"},
+						},
+					},
+				},
+			},
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.0.0.0/24"),
+			},
+		},
+		{
+			name: "node-can-access-multiple-specific-routes",
+			args: args{
+				node: &types.Node{
+					ID:   1,
+					IPv4: ap("100.64.0.1"),
+					User: types.User{Name: "user1"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.0.0.0/24"),
+					netip.MustParsePrefix("192.168.1.0/24"),
+					netip.MustParsePrefix("172.16.0.0/16"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"100.64.0.1"},
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.0.0.0/24"},
+							{IP: "192.168.1.0/24"},
+						},
+					},
+				},
+			},
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.0.0.0/24"),
+				netip.MustParsePrefix("192.168.1.0/24"),
+			},
+		},
+		{
+			name: "node-can-access-overlapping-routes",
+			args: args{
+				node: &types.Node{
+					ID:   1,
+					IPv4: ap("100.64.0.1"),
+					User: types.User{Name: "user1"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.0.0.0/24"),
+					netip.MustParsePrefix("10.0.0.0/16"), // Overlaps with the first one
+					netip.MustParsePrefix("192.168.1.0/24"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"100.64.0.1"},
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.0.0.0/16"},
+						},
+					},
+				},
+			},
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.0.0.0/24"),
+				netip.MustParsePrefix("10.0.0.0/16"),
+			},
+		},
+		{
+			name: "node-with-no-matching-rules",
+			args: args{
+				node: &types.Node{
+					ID:   1,
+					IPv4: ap("100.64.0.1"),
+					User: types.User{Name: "user1"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.0.0.0/24"),
+					netip.MustParsePrefix("192.168.1.0/24"),
+					netip.MustParsePrefix("172.16.0.0/16"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"100.64.0.2"}, // Different source IP
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "*"},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "node-with-both-ipv4-and-ipv6",
+			args: args{
+				node: &types.Node{
+					ID:   1,
+					IPv4: ap("100.64.0.1"),
+					IPv6: ap("fd7a:115c:a1e0::1"),
+					User: types.User{Name: "user1"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.0.0.0/24"),
+					netip.MustParsePrefix("2001:db8::/64"),
+					netip.MustParsePrefix("192.168.1.0/24"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"fd7a:115c:a1e0::1"}, // IPv6 source
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "2001:db8::/64"}, // IPv6 destination
+						},
+					},
+					{
+						SrcIPs: []string{"100.64.0.1"}, // IPv4 source
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.0.0.0/24"}, // IPv4 destination
+						},
+					},
+				},
+			},
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.0.0.0/24"),
+				netip.MustParsePrefix("2001:db8::/64"),
+			},
+		},
+		{
+			name: "router-with-multiple-routes-and-node-with-specific-access",
+			args: args{
+				node: &types.Node{
+					ID:   2,
+					IPv4: ap("100.64.0.2"), // Node IP
+					User: types.User{Name: "node"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.10.10.0/24"),
+					netip.MustParsePrefix("10.10.11.0/24"),
+					netip.MustParsePrefix("10.10.12.0/24"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"*"}, // Any source
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "100.64.0.1"}, // Router node
+						},
+					},
+					{
+						SrcIPs: []string{"100.64.0.2"}, // Node IP
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.10.0/24"}, // Only one subnet allowed
+						},
+					},
+				},
+			},
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.10.10.0/24"),
+			},
+		},
+		{
+			name: "node-with-access-to-one-subnet-and-partial-overlap",
+			args: args{
+				node: &types.Node{
+					ID:   2,
+					IPv4: ap("100.64.0.2"),
+					User: types.User{Name: "node"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.10.10.0/24"),
+					netip.MustParsePrefix("10.10.11.0/24"),
+					netip.MustParsePrefix("10.10.10.0/16"), // Overlaps with the first one
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"100.64.0.2"},
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.10.0/24"}, // Only specific subnet
+						},
+					},
+				},
+			},
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.10.10.0/24"),
+				netip.MustParsePrefix("10.10.10.0/16"), // With current implementation, this is included because it overlaps with the allowed subnet
+			},
+		},
+		{
+			name: "node-with-access-to-wildcard-subnet",
+			args: args{
+				node: &types.Node{
+					ID:   2,
+					IPv4: ap("100.64.0.2"),
+					User: types.User{Name: "node"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.10.10.0/24"),
+					netip.MustParsePrefix("10.10.11.0/24"),
+					netip.MustParsePrefix("10.10.12.0/24"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"100.64.0.2"},
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.0.0/16"}, // Broader subnet that includes all three
+						},
+					},
+				},
+			},
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.10.10.0/24"),
+				netip.MustParsePrefix("10.10.11.0/24"),
+				netip.MustParsePrefix("10.10.12.0/24"),
+			},
+		},
+		{
+			name: "multiple-nodes-with-different-subnet-permissions",
+			args: args{
+				node: &types.Node{
+					ID:   2,
+					IPv4: ap("100.64.0.2"),
+					User: types.User{Name: "node"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.10.10.0/24"),
+					netip.MustParsePrefix("10.10.11.0/24"),
+					netip.MustParsePrefix("10.10.12.0/24"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"100.64.0.1"}, // Different node
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.11.0/24"},
+						},
+					},
+					{
+						SrcIPs: []string{"100.64.0.2"}, // Our node
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.10.0/24"},
+						},
+					},
+					{
+						SrcIPs: []string{"100.64.0.3"}, // Different node
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.12.0/24"},
+						},
+					},
+				},
+			},
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.10.10.0/24"),
+			},
+		},
+		{
+			name: "exactly-matching-users-acl-example",
+			args: args{
+				node: &types.Node{
+					ID:   2,
+					IPv4: ap("100.64.0.2"), // node with IP 100.64.0.2
+					User: types.User{Name: "node"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.10.10.0/24"),
+					netip.MustParsePrefix("10.10.11.0/24"),
+					netip.MustParsePrefix("10.10.12.0/24"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						// This represents the rule: action: accept, src: ["*"], dst: ["router:0"]
+						SrcIPs: []string{"*"}, // Any source
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "100.64.0.1"}, // Router IP
+						},
+					},
+					{
+						// This represents the rule: action: accept, src: ["node"], dst: ["10.10.10.0/24:*"]
+						SrcIPs: []string{"100.64.0.2"}, // Node IP
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.10.0/24", Ports: tailcfg.PortRangeAny}, // All ports on this subnet
+						},
+					},
+				},
+			},
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.10.10.0/24"),
+			},
+		},
+		{
+			name: "acl-all-source-nodes-can-access-router-only-node-can-access-10.10.10.0-24",
+			args: args{
+				// When testing from router node's perspective
+				node: &types.Node{
+					ID:   1,
+					IPv4: ap("100.64.0.1"), // router with IP 100.64.0.1
+					User: types.User{Name: "router"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.10.10.0/24"),
+					netip.MustParsePrefix("10.10.11.0/24"),
+					netip.MustParsePrefix("10.10.12.0/24"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"*"},
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "100.64.0.1"}, // Router can be accessed by all
+						},
+					},
+					{
+						SrcIPs: []string{"100.64.0.2"}, // Only node
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.10.0/24"}, // Can access this subnet
+						},
+					},
+					// Add a rule for router to access its own routes
+					{
+						SrcIPs: []string{"100.64.0.1"}, // Router node
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "*"}, // Can access everything
+						},
+					},
+				},
+			},
+			// Router needs explicit rules to access routes
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.10.10.0/24"),
+				netip.MustParsePrefix("10.10.11.0/24"),
+				netip.MustParsePrefix("10.10.12.0/24"),
+			},
+		},
+		{
+			name: "acl-specific-port-ranges-for-subnets",
+			args: args{
+				node: &types.Node{
+					ID:   2,
+					IPv4: ap("100.64.0.2"), // node
+					User: types.User{Name: "node"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.10.10.0/24"),
+					netip.MustParsePrefix("10.10.11.0/24"),
+					netip.MustParsePrefix("10.10.12.0/24"),
+				},
+				rules: []tailcfg.FilterRule{
+					{
+						SrcIPs: []string{"100.64.0.2"}, // node
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.10.0/24", Ports: tailcfg.PortRange{First: 22, Last: 22}}, // Only SSH
+						},
+					},
+					{
+						SrcIPs: []string{"100.64.0.2"}, // node
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.11.0/24", Ports: tailcfg.PortRange{First: 80, Last: 80}}, // Only HTTP
+						},
+					},
+				},
+			},
+			// Should get both subnets with specific port ranges
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.10.10.0/24"),
+				netip.MustParsePrefix("10.10.11.0/24"),
+			},
+		},
+		{
+			name: "acl-order-of-rules-and-rule-specificity",
+			args: args{
+				node: &types.Node{
+					ID:   2,
+					IPv4: ap("100.64.0.2"), // node
+					User: types.User{Name: "node"},
+				},
+				routes: []netip.Prefix{
+					netip.MustParsePrefix("10.10.10.0/24"),
+					netip.MustParsePrefix("10.10.11.0/24"),
+					netip.MustParsePrefix("10.10.12.0/24"),
+				},
+				rules: []tailcfg.FilterRule{
+					// First rule allows all traffic
+					{
+						SrcIPs: []string{"*"}, // Any source
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "*", Ports: tailcfg.PortRangeAny}, // Any destination and any port
+						},
+					},
+					// Second rule is more specific but should be overridden by the first rule
+					{
+						SrcIPs: []string{"100.64.0.2"}, // node
+						DstPorts: []tailcfg.NetPortRange{
+							{IP: "10.10.10.0/24"},
+						},
+					},
+				},
+			},
+			// Due to the first rule allowing all traffic, node should have access to all routes
+			want: []netip.Prefix{
+				netip.MustParsePrefix("10.10.10.0/24"),
+				netip.MustParsePrefix("10.10.11.0/24"),
+				netip.MustParsePrefix("10.10.12.0/24"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matchers := matcher.MatchesFromFilterRules(tt.args.rules)
+			got := ReduceRoutes(
+				tt.args.node,
+				tt.args.routes,
+				matchers,
+			)
+			if diff := cmp.Diff(tt.want, got, util.Comparers...); diff != "" {
+				t.Errorf("ReduceRoutes() unexpected result (-want +got):\n%s", diff)
 			}
 		})
 	}

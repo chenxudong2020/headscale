@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
-	"time"
 
 	"slices"
 
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/util"
+	"github.com/prometheus/common/model"
 	"github.com/tailscale/hujson"
 	"go4.org/netipx"
 	"tailscale.com/net/tsaddr"
@@ -162,6 +162,10 @@ func (g Group) CanBeAutoApprover() bool {
 	return true
 }
 
+func (g Group) String() string {
+	return string(g)
+}
+
 func (g Group) Resolve(p *Policy, users types.Users, nodes types.Nodes) (*netipx.IPSet, error) {
 	var ips netipx.IPSetBuilder
 	var errs []error
@@ -233,6 +237,10 @@ func (t Tag) Resolve(p *Policy, users types.Users, nodes types.Nodes) (*netipx.I
 
 func (t Tag) CanBeAutoApprover() bool {
 	return true
+}
+
+func (t Tag) String() string {
+	return string(t)
 }
 
 // Host is a string that represents a hostname.
@@ -374,13 +382,19 @@ func (p Prefix) Resolve(_ *Policy, _ types.Users, nodes types.Nodes) (*netipx.IP
 type AutoGroup string
 
 const (
-	AutoGroupInternet = "autogroup:internet"
+	AutoGroupInternet AutoGroup = "autogroup:internet"
+	AutoGroupNonRoot  AutoGroup = "autogroup:nonroot"
+
+	// These are not yet implemented.
+	AutoGroupSelf   AutoGroup = "autogroup:self"
+	AutoGroupMember AutoGroup = "autogroup:member"
+	AutoGroupTagged AutoGroup = "autogroup:tagged"
 )
 
-var autogroups = []string{AutoGroupInternet}
+var autogroups = []AutoGroup{AutoGroupInternet}
 
 func (ag AutoGroup) Validate() error {
-	if slices.Contains(autogroups, string(ag)) {
+	if slices.Contains(autogroups, ag) {
 		return nil
 	}
 
@@ -402,6 +416,14 @@ func (ag AutoGroup) Resolve(_ *Policy, _ types.Users, _ types.Nodes) (*netipx.IP
 	}
 
 	return nil, nil
+}
+
+func (ag *AutoGroup) Is(c AutoGroup) bool {
+	if ag == nil {
+		return false
+	}
+
+	return *ag == c
 }
 
 type Alias interface {
@@ -524,7 +546,7 @@ Please check the format and try again.`, vs)
 type AliasEnc struct{ Alias }
 
 func (ve *AliasEnc) UnmarshalJSON(b []byte) error {
-	ptr, err := unmarshalPointer[Alias](
+	ptr, err := unmarshalPointer(
 		b,
 		parseAlias,
 	)
@@ -590,6 +612,7 @@ func unmarshalPointer[T any](
 type AutoApprover interface {
 	CanBeAutoApprover() bool
 	UnmarshalJSON([]byte) error
+	String() string
 }
 
 type AutoApprovers []AutoApprover
@@ -630,7 +653,7 @@ Please check the format and try again.`, s)
 type AutoApproverEnc struct{ AutoApprover }
 
 func (ve *AutoApproverEnc) UnmarshalJSON(b []byte) error {
-	ptr, err := unmarshalPointer[AutoApprover](
+	ptr, err := unmarshalPointer(
 		b,
 		parseAutoApprover,
 	)
@@ -650,7 +673,7 @@ type Owner interface {
 type OwnerEnc struct{ Owner }
 
 func (ve *OwnerEnc) UnmarshalJSON(b []byte) error {
-	ptr, err := unmarshalPointer[Owner](
+	ptr, err := unmarshalPointer(
 		b,
 		parseOwner,
 	)
@@ -696,6 +719,20 @@ type Usernames []Username
 
 // Groups are a map of Group to a list of Username.
 type Groups map[Group]Usernames
+
+func (g Groups) Contains(group *Group) error {
+	if group == nil {
+		return nil
+	}
+
+	for defined := range map[Group]Usernames(g) {
+		if defined == *group {
+			return nil
+		}
+	}
+
+	return fmt.Errorf(`Group %q is not defined in the Policy, please define or remove the reference to it`, group)
+}
 
 // UnmarshalJSON overrides the default JSON unmarshalling for Groups to ensure
 // that each group name is validated using the isGroup function. This ensures
@@ -760,8 +797,27 @@ func (h *Hosts) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+func (h Hosts) exist(name Host) bool {
+	_, ok := h[name]
+	return ok
+}
+
 // TagOwners are a map of Tag to a list of the UserEntities that own the tag.
 type TagOwners map[Tag]Owners
+
+func (to TagOwners) Contains(tagOwner *Tag) error {
+	if tagOwner == nil {
+		return nil
+	}
+
+	for defined := range map[Tag]Owners(to) {
+		if defined == *tagOwner {
+			return nil
+		}
+	}
+
+	return fmt.Errorf(`Tag %q is not defined in the Policy, please define or remove the reference to it`, tagOwner)
+}
 
 // resolveTagOwners resolves the TagOwners to a map of Tag to netipx.IPSet.
 // The resulting map can be used to quickly look up the IPSet for a given Tag.
@@ -806,10 +862,11 @@ type AutoApproverPolicy struct {
 // resolveAutoApprovers resolves the AutoApprovers to a map of netip.Prefix to netipx.IPSet.
 // The resulting map can be used to quickly look up if a node can self-approve a route.
 // It is intended for internal use in a PolicyManager.
-func resolveAutoApprovers(p *Policy, users types.Users, nodes types.Nodes) (map[netip.Prefix]*netipx.IPSet, error) {
+func resolveAutoApprovers(p *Policy, users types.Users, nodes types.Nodes) (map[netip.Prefix]*netipx.IPSet, *netipx.IPSet, error) {
 	if p == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
+	var err error
 
 	routes := make(map[netip.Prefix]*netipx.IPSetBuilder)
 
@@ -821,7 +878,7 @@ func resolveAutoApprovers(p *Policy, users types.Users, nodes types.Nodes) (map[
 			aa, ok := autoApprover.(Alias)
 			if !ok {
 				// Should never happen
-				return nil, fmt.Errorf("autoApprover %v is not an Alias", autoApprover)
+				return nil, nil, fmt.Errorf("autoApprover %v is not an Alias", autoApprover)
 			}
 			// If it does not resolve, that means the autoApprover is not associated with any IP addresses.
 			ips, _ := aa.Resolve(p, users, nodes)
@@ -835,7 +892,7 @@ func resolveAutoApprovers(p *Policy, users types.Users, nodes types.Nodes) (map[
 			aa, ok := autoApprover.(Alias)
 			if !ok {
 				// Should never happen
-				return nil, fmt.Errorf("autoApprover %v is not an Alias", autoApprover)
+				return nil, nil, fmt.Errorf("autoApprover %v is not an Alias", autoApprover)
 			}
 			// If it does not resolve, that means the autoApprover is not associated with any IP addresses.
 			ips, _ := aa.Resolve(p, users, nodes)
@@ -847,22 +904,20 @@ func resolveAutoApprovers(p *Policy, users types.Users, nodes types.Nodes) (map[
 	for prefix, builder := range routes {
 		ipSet, err := builder.IPSet()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		ret[prefix] = ipSet
 	}
 
+	var exitNodeSet *netipx.IPSet
 	if len(p.AutoApprovers.ExitNode) > 0 {
-		exitNodeSet, err := exitNodeSetBuilder.IPSet()
+		exitNodeSet, err = exitNodeSetBuilder.IPSet()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-
-		ret[tsaddr.AllIPv4()] = exitNodeSet
-		ret[tsaddr.AllIPv6()] = exitNodeSet
 	}
 
-	return ret, nil
+	return ret, exitNodeSet, nil
 }
 
 type ACL struct {
@@ -893,13 +948,300 @@ type Policy struct {
 	SSHs          []SSH              `json:"ssh"`
 }
 
+var (
+	autogroupForSrc       = []AutoGroup{}
+	autogroupForDst       = []AutoGroup{AutoGroupInternet}
+	autogroupForSSHSrc    = []AutoGroup{}
+	autogroupForSSHDst    = []AutoGroup{}
+	autogroupForSSHUser   = []AutoGroup{AutoGroupNonRoot}
+	autogroupNotSupported = []AutoGroup{AutoGroupSelf, AutoGroupMember, AutoGroupTagged}
+)
+
+func validateAutogroupSupported(ag *AutoGroup) error {
+	if ag == nil {
+		return nil
+	}
+
+	if slices.Contains(autogroupNotSupported, *ag) {
+		return fmt.Errorf("autogroup %q is not supported in headscale", *ag)
+	}
+
+	return nil
+}
+
+func validateAutogroupForSrc(src *AutoGroup) error {
+	if src == nil {
+		return nil
+	}
+
+	if src.Is(AutoGroupInternet) {
+		return fmt.Errorf(`"autogroup:internet" used in source, it can only be used in ACL destinations`)
+	}
+
+	if !slices.Contains(autogroupForSrc, *src) {
+		return fmt.Errorf("autogroup %q is not supported for ACL sources, can be %v", *src, autogroupForSrc)
+	}
+
+	return nil
+}
+
+func validateAutogroupForDst(dst *AutoGroup) error {
+	if dst == nil {
+		return nil
+	}
+
+	if !slices.Contains(autogroupForDst, *dst) {
+		return fmt.Errorf("autogroup %q is not supported for ACL destinations, can be %v", *dst, autogroupForDst)
+	}
+
+	return nil
+}
+
+func validateAutogroupForSSHSrc(src *AutoGroup) error {
+	if src == nil {
+		return nil
+	}
+
+	if src.Is(AutoGroupInternet) {
+		return fmt.Errorf(`"autogroup:internet" used in SSH source, it can only be used in ACL destinations`)
+	}
+
+	if !slices.Contains(autogroupForSSHSrc, *src) {
+		return fmt.Errorf("autogroup %q is not supported for SSH sources, can be %v", *src, autogroupForSSHSrc)
+	}
+
+	return nil
+}
+
+func validateAutogroupForSSHDst(dst *AutoGroup) error {
+	if dst == nil {
+		return nil
+	}
+
+	if dst.Is(AutoGroupInternet) {
+		return fmt.Errorf(`"autogroup:internet" used in SSH destination, it can only be used in ACL destinations`)
+	}
+
+	if !slices.Contains(autogroupForSSHDst, *dst) {
+		return fmt.Errorf("autogroup %q is not supported for SSH sources, can be %v", *dst, autogroupForSSHDst)
+	}
+
+	return nil
+}
+
+func validateAutogroupForSSHUser(user *AutoGroup) error {
+	if user == nil {
+		return nil
+	}
+
+	if !slices.Contains(autogroupForSSHUser, *user) {
+		return fmt.Errorf("autogroup %q is not supported for SSH user, can be %v", *user, autogroupForSSHUser)
+	}
+
+	return nil
+}
+
+// validate reports if there are any errors in a policy after
+// the unmarshaling process.
+// It runs through all rules and checks if there are any inconsistencies
+// in the policy that needs to be addressed before it can be used.
+func (p *Policy) validate() error {
+	if p == nil {
+		panic("passed nil policy")
+	}
+
+	// All errors are collected and presented to the user,
+	// when adding more validation, please add to the list of errors.
+	var errs []error
+
+	for _, acl := range p.ACLs {
+		for _, src := range acl.Sources {
+			switch src.(type) {
+			case *Host:
+				h := src.(*Host)
+				if !p.Hosts.exist(*h) {
+					errs = append(errs, fmt.Errorf(`Host %q is not defined in the Policy, please define or remove the reference to it`, *h))
+				}
+			case *AutoGroup:
+				ag := src.(*AutoGroup)
+
+				if err := validateAutogroupSupported(ag); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+
+				if err := validateAutogroupForSrc(ag); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+			case *Group:
+				g := src.(*Group)
+				if err := p.Groups.Contains(g); err != nil {
+					errs = append(errs, err)
+				}
+			case *Tag:
+				tagOwner := src.(*Tag)
+				if err := p.TagOwners.Contains(tagOwner); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+
+		for _, dst := range acl.Destinations {
+			switch dst.Alias.(type) {
+			case *Host:
+				h := dst.Alias.(*Host)
+				if !p.Hosts.exist(*h) {
+					errs = append(errs, fmt.Errorf(`Host %q is not defined in the Policy, please define or remove the reference to it`, *h))
+				}
+			case *AutoGroup:
+				ag := dst.Alias.(*AutoGroup)
+
+				if err := validateAutogroupSupported(ag); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+
+				if err := validateAutogroupForDst(ag); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+			case *Group:
+				g := dst.Alias.(*Group)
+				if err := p.Groups.Contains(g); err != nil {
+					errs = append(errs, err)
+				}
+			case *Tag:
+				tagOwner := dst.Alias.(*Tag)
+				if err := p.TagOwners.Contains(tagOwner); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
+
+	for _, ssh := range p.SSHs {
+		if ssh.Action != "accept" && ssh.Action != "check" {
+			errs = append(errs, fmt.Errorf("SSH action %q is not valid, must be accept or check", ssh.Action))
+		}
+
+		for _, user := range ssh.Users {
+			if strings.HasPrefix(string(user), "autogroup:") {
+				maybeAuto := AutoGroup(user)
+				if err := validateAutogroupForSSHUser(&maybeAuto); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+			}
+		}
+
+		for _, src := range ssh.Sources {
+			switch src.(type) {
+			case *AutoGroup:
+				ag := src.(*AutoGroup)
+
+				if err := validateAutogroupSupported(ag); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+
+				if err := validateAutogroupForSSHSrc(ag); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+			case *Group:
+				g := src.(*Group)
+				if err := p.Groups.Contains(g); err != nil {
+					errs = append(errs, err)
+				}
+			case *Tag:
+				tagOwner := src.(*Tag)
+				if err := p.TagOwners.Contains(tagOwner); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+		for _, dst := range ssh.Destinations {
+			switch dst.(type) {
+			case *AutoGroup:
+				ag := dst.(*AutoGroup)
+				if err := validateAutogroupSupported(ag); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+
+				if err := validateAutogroupForSSHDst(ag); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+			case *Tag:
+				tagOwner := dst.(*Tag)
+				if err := p.TagOwners.Contains(tagOwner); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
+
+	for _, tagOwners := range p.TagOwners {
+		for _, tagOwner := range tagOwners {
+			switch tagOwner.(type) {
+			case *Group:
+				g := tagOwner.(*Group)
+				if err := p.Groups.Contains(g); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
+
+	for _, approvers := range p.AutoApprovers.Routes {
+		for _, approver := range approvers {
+			switch approver.(type) {
+			case *Group:
+				g := approver.(*Group)
+				if err := p.Groups.Contains(g); err != nil {
+					errs = append(errs, err)
+				}
+			case *Tag:
+				tagOwner := approver.(*Tag)
+				if err := p.TagOwners.Contains(tagOwner); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
+
+	for _, approver := range p.AutoApprovers.ExitNode {
+		switch approver.(type) {
+		case *Group:
+			g := approver.(*Group)
+			if err := p.Groups.Contains(g); err != nil {
+				errs = append(errs, err)
+			}
+		case *Tag:
+			tagOwner := approver.(*Tag)
+			if err := p.TagOwners.Contains(tagOwner); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return multierr.New(errs...)
+	}
+
+	p.validated = true
+	return nil
+}
+
 // SSH controls who can ssh into which machines.
 type SSH struct {
-	Action       string        `json:"action"` // TODO(kradalby): add strict type
-	Sources      SSHSrcAliases `json:"src"`
-	Destinations SSHDstAliases `json:"dst"`
-	Users        []SSHUser     `json:"users"`
-	CheckPeriod  time.Duration `json:"checkPeriod,omitempty"`
+	Action       string         `json:"action"`
+	Sources      SSHSrcAliases  `json:"src"`
+	Destinations SSHDstAliases  `json:"dst"`
+	Users        []SSHUser      `json:"users"`
+	CheckPeriod  model.Duration `json:"checkPeriod,omitempty"`
 }
 
 // SSHSrcAliases is a list of aliases that can be used as sources in an SSH rule.
@@ -961,8 +1303,8 @@ func (a *SSHDstAliases) UnmarshalJSON(b []byte) error {
 			// so we will leave it in as there is no other option
 			// to dynamically give all access
 			// https://tailscale.com/kb/1193/tailscale-ssh#dst
-			Asterix,
-			*Group:
+			// TODO(kradalby): remove this when we support autogroup:tagged and autogroup:member
+			Asterix:
 			(*a)[i] = alias.Alias
 		default:
 			return fmt.Errorf("type %T not supported", alias.Alias)
@@ -977,7 +1319,10 @@ func (u SSHUser) String() string {
 	return string(u)
 }
 
-func policyFromBytes(b []byte) (*Policy, error) {
+// unmarshalPolicy takes a byte slice and unmarshals it into a Policy struct.
+// In addition to unmarshalling, it will also validate the policy.
+// This is the only entrypoint of reading a policy from a file or other source.
+func unmarshalPolicy(b []byte) (*Policy, error) {
 	if b == nil || len(b) == 0 {
 		return nil, nil
 	}
@@ -991,9 +1336,12 @@ func policyFromBytes(b []byte) (*Policy, error) {
 	ast.Standardize()
 	acl := ast.Pack()
 
-	err = json.Unmarshal(acl, &policy)
-	if err != nil {
+	if err = json.Unmarshal(acl, &policy); err != nil {
 		return nil, fmt.Errorf("parsing policy from bytes: %w", err)
+	}
+
+	if err := policy.validate(); err != nil {
+		return nil, err
 	}
 
 	return &policy, nil

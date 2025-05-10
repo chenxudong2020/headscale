@@ -13,6 +13,7 @@ import (
 	v1 "github.com/juanfont/headscale/gen/go/headscale/v1"
 	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/pterm/pterm"
+	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc/status"
 	"tailscale.com/types/key"
@@ -78,7 +79,7 @@ func init() {
 		log.Fatal(err.Error())
 	}
 
-	moveNodeCmd.Flags().StringP("user", "u", "", "New user")
+	moveNodeCmd.Flags().Uint64P("user", "u", 0, "New user")
 
 	moveNodeCmd.Flags().StringP("namespace", "n", "", "User")
 	moveNodeNamespaceFlag := moveNodeCmd.Flags().Lookup("namespace")
@@ -253,6 +254,10 @@ var listNodeRoutesCmd = &cobra.Command{
 				}
 			}
 		}
+
+		nodes = lo.Filter(nodes, func(n *v1.Node, _ int) bool {
+			return (n.GetSubnetRoutes() != nil && len(n.GetSubnetRoutes()) > 0) || (n.GetApprovedRoutes() != nil && len(n.GetApprovedRoutes()) > 0) || (n.GetAvailableRoutes() != nil && len(n.GetAvailableRoutes()) > 0)
+		})
 
 		tableData, err := nodeRoutesToPtables(nodes)
 		if err != nil {
@@ -470,7 +475,7 @@ var moveNodeCmd = &cobra.Command{
 			return
 		}
 
-		user, err := cmd.Flags().GetString("user")
+		user, err := cmd.Flags().GetUint64("user")
 		if err != nil {
 			ErrorOutput(
 				err,

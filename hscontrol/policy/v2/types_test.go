@@ -361,6 +361,351 @@ func TestUnmarshalPolicy(t *testing.T) {
 `,
 			wantErr: `AutoGroup is invalid, got: "autogroup:invalid", must be one of [autogroup:internet]`,
 		},
+		{
+			name: "undefined-hostname-errors-2490",
+			input: `
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": [
+        "user1"
+      ],
+      "dst": [
+        "user1:*"
+      ]
+    }
+  ]
+}
+`,
+			wantErr: `Host "user1" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "defined-hostname-does-not-err-2490",
+			input: `
+{
+  "hosts": {
+		"user1": "100.100.100.100",
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": [
+        "user1"
+      ],
+      "dst": [
+        "user1:*"
+      ]
+    }
+  ]
+}
+`,
+			want: &Policy{
+				Hosts: Hosts{
+					"user1": Prefix(mp("100.100.100.100/32")),
+				},
+				ACLs: []ACL{
+					{
+						Action: "accept",
+						Sources: Aliases{
+							hp("user1"),
+						},
+						Destinations: []AliasWithPorts{
+							{
+								Alias: hp("user1"),
+								Ports: []tailcfg.PortRange{tailcfg.PortRangeAny},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "autogroup:internet-in-dst-allowed",
+			input: `
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": [
+        "10.0.0.1"
+      ],
+      "dst": [
+        "autogroup:internet:*"
+      ]
+    }
+  ]
+}
+`,
+			want: &Policy{
+				ACLs: []ACL{
+					{
+						Action: "accept",
+						Sources: Aliases{
+							pp("10.0.0.1/32"),
+						},
+						Destinations: []AliasWithPorts{
+							{
+								Alias: ptr.To(AutoGroup("autogroup:internet")),
+								Ports: []tailcfg.PortRange{tailcfg.PortRangeAny},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "autogroup:internet-in-src-not-allowed",
+			input: `
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": [
+        "autogroup:internet"
+      ],
+      "dst": [
+        "10.0.0.1:*"
+      ]
+    }
+  ]
+}
+`,
+			wantErr: `"autogroup:internet" used in source, it can only be used in ACL destinations`,
+		},
+		{
+			name: "autogroup:internet-in-ssh-src-not-allowed",
+			input: `
+{
+  "ssh": [
+    {
+      "action": "accept",
+      "src": [
+        "autogroup:internet"
+      ],
+      "dst": [
+        "tag:test"
+      ]
+    }
+  ]
+}
+`,
+			wantErr: `"autogroup:internet" used in SSH source, it can only be used in ACL destinations`,
+		},
+		{
+			name: "autogroup:internet-in-ssh-dst-not-allowed",
+			input: `
+{
+  "ssh": [
+    {
+      "action": "accept",
+      "src": [
+        "tag:test"
+      ],
+      "dst": [
+        "autogroup:internet"
+      ]
+    }
+  ]
+}
+`,
+			wantErr: `"autogroup:internet" used in SSH destination, it can only be used in ACL destinations`,
+		},
+		{
+			name: "group-must-be-defined-acl-src",
+			input: `
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": [
+        "group:notdefined"
+      ],
+      "dst": [
+        "autogroup:internet:*"
+      ]
+    }
+  ]
+}
+`,
+			wantErr: `Group "group:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "group-must-be-defined-acl-dst",
+			input: `
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": [
+        "*"
+      ],
+      "dst": [
+        "group:notdefined:*"
+      ]
+    }
+  ]
+}
+`,
+			wantErr: `Group "group:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "group-must-be-defined-acl-ssh-src",
+			input: `
+{
+  "ssh": [
+    {
+      "action": "accept",
+      "src": [
+        "group:notdefined"
+      ],
+      "dst": [
+        "user@"
+      ]
+    }
+  ]
+}
+`,
+			wantErr: `Group "group:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "group-must-be-defined-acl-tagOwner",
+			input: `
+{
+  "tagOwners": {
+    "tag:test": ["group:notdefined"],
+  },
+}
+`,
+			wantErr: `Group "group:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "group-must-be-defined-acl-autoapprover-route",
+			input: `
+{
+  "autoApprovers": {
+    "routes": {
+      "10.0.0.0/16": ["group:notdefined"]
+    }
+  },
+}
+`,
+			wantErr: `Group "group:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "group-must-be-defined-acl-autoapprover-exitnode",
+			input: `
+{
+  "autoApprovers": {
+    "exitNode": ["group:notdefined"]
+   },
+}
+`,
+			wantErr: `Group "group:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "tag-must-be-defined-acl-src",
+			input: `
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": [
+        "tag:notdefined"
+      ],
+      "dst": [
+        "autogroup:internet:*"
+      ]
+    }
+  ]
+}
+`,
+			wantErr: `Tag "tag:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "tag-must-be-defined-acl-dst",
+			input: `
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": [
+        "*"
+      ],
+      "dst": [
+        "tag:notdefined:*"
+      ]
+    }
+  ]
+}
+`,
+			wantErr: `Tag "tag:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "tag-must-be-defined-acl-ssh-src",
+			input: `
+{
+  "ssh": [
+    {
+      "action": "accept",
+      "src": [
+        "tag:notdefined"
+      ],
+      "dst": [
+        "user@"
+      ]
+    }
+  ]
+}
+`,
+			wantErr: `Tag "tag:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "tag-must-be-defined-acl-ssh-dst",
+			input: `
+{
+  "groups": {
+  	"group:defined": ["user@"],
+  },
+  "ssh": [
+    {
+      "action": "accept",
+      "src": [
+        "group:defined"
+      ],
+      "dst": [
+        "tag:notdefined",
+      ],
+    }
+  ]
+}
+`,
+			wantErr: `Tag "tag:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "tag-must-be-defined-acl-autoapprover-route",
+			input: `
+{
+  "autoApprovers": {
+    "routes": {
+      "10.0.0.0/16": ["tag:notdefined"]
+    }
+  },
+}
+`,
+			wantErr: `Tag "tag:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
+		{
+			name: "tag-must-be-defined-acl-autoapprover-exitnode",
+			input: `
+{
+  "autoApprovers": {
+    "exitNode": ["tag:notdefined"]
+   },
+}
+`,
+			wantErr: `Tag "tag:notdefined" is not defined in the Policy, please define or remove the reference to it`,
+		},
 	}
 
 	cmps := append(util.Comparers, cmp.Comparer(func(x, y Prefix) bool {
@@ -370,7 +715,7 @@ func TestUnmarshalPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			policy, err := policyFromBytes([]byte(tt.input))
+			policy, err := unmarshalPolicy([]byte(tt.input))
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("got %v; want no error", err)
@@ -679,10 +1024,11 @@ func TestResolveAutoApprovers(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		policy  *Policy
-		want    map[netip.Prefix]*netipx.IPSet
-		wantErr bool
+		name            string
+		policy          *Policy
+		want            map[netip.Prefix]*netipx.IPSet
+		wantAllIPRoutes *netipx.IPSet
+		wantErr         bool
 	}{
 		{
 			name: "single-route",
@@ -696,7 +1042,8 @@ func TestResolveAutoApprovers(t *testing.T) {
 			want: map[netip.Prefix]*netipx.IPSet{
 				mp("10.0.0.0/24"): mustIPSet("100.64.0.1/32"),
 			},
-			wantErr: false,
+			wantAllIPRoutes: nil,
+			wantErr:         false,
 		},
 		{
 			name: "multiple-routes",
@@ -712,7 +1059,8 @@ func TestResolveAutoApprovers(t *testing.T) {
 				mp("10.0.0.0/24"): mustIPSet("100.64.0.1/32"),
 				mp("10.0.1.0/24"): mustIPSet("100.64.0.2/32"),
 			},
-			wantErr: false,
+			wantAllIPRoutes: nil,
+			wantErr:         false,
 		},
 		{
 			name: "exit-node",
@@ -721,11 +1069,9 @@ func TestResolveAutoApprovers(t *testing.T) {
 					ExitNode: AutoApprovers{ptr.To(Username("user1@"))},
 				},
 			},
-			want: map[netip.Prefix]*netipx.IPSet{
-				tsaddr.AllIPv4(): mustIPSet("100.64.0.1/32"),
-				tsaddr.AllIPv6(): mustIPSet("100.64.0.1/32"),
-			},
-			wantErr: false,
+			want:            map[netip.Prefix]*netipx.IPSet{},
+			wantAllIPRoutes: mustIPSet("100.64.0.1/32"),
+			wantErr:         false,
 		},
 		{
 			name: "group-route",
@@ -742,7 +1088,8 @@ func TestResolveAutoApprovers(t *testing.T) {
 			want: map[netip.Prefix]*netipx.IPSet{
 				mp("10.0.0.0/24"): mustIPSet("100.64.0.1/32", "100.64.0.2/32"),
 			},
-			wantErr: false,
+			wantAllIPRoutes: nil,
+			wantErr:         false,
 		},
 		{
 			name: "tag-route-and-exit",
@@ -768,10 +1115,9 @@ func TestResolveAutoApprovers(t *testing.T) {
 			},
 			want: map[netip.Prefix]*netipx.IPSet{
 				mp("10.0.1.0/24"): mustIPSet("100.64.0.4/32"),
-				tsaddr.AllIPv4():  mustIPSet("100.64.0.5/32"),
-				tsaddr.AllIPv6():  mustIPSet("100.64.0.5/32"),
 			},
-			wantErr: false,
+			wantAllIPRoutes: mustIPSet("100.64.0.5/32"),
+			wantErr:         false,
 		},
 		{
 			name: "mixed-routes-and-exit-nodes",
@@ -790,10 +1136,9 @@ func TestResolveAutoApprovers(t *testing.T) {
 			want: map[netip.Prefix]*netipx.IPSet{
 				mp("10.0.0.0/24"): mustIPSet("100.64.0.1/32", "100.64.0.2/32"),
 				mp("10.0.1.0/24"): mustIPSet("100.64.0.3/32"),
-				tsaddr.AllIPv4():  mustIPSet("100.64.0.1/32"),
-				tsaddr.AllIPv6():  mustIPSet("100.64.0.1/32"),
 			},
-			wantErr: false,
+			wantAllIPRoutes: mustIPSet("100.64.0.1/32"),
+			wantErr:         false,
 		},
 	}
 
@@ -801,13 +1146,22 @@ func TestResolveAutoApprovers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveAutoApprovers(tt.policy, users, nodes)
+			got, gotAllIPRoutes, err := resolveAutoApprovers(tt.policy, users, nodes)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("resolveAutoApprovers() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			if diff := cmp.Diff(tt.want, got, cmps...); diff != "" {
 				t.Errorf("resolveAutoApprovers() mismatch (-want +got):\n%s", diff)
+			}
+			if tt.wantAllIPRoutes != nil {
+				if gotAllIPRoutes == nil {
+					t.Error("resolveAutoApprovers() expected non-nil allIPRoutes, got nil")
+				} else if diff := cmp.Diff(tt.wantAllIPRoutes, gotAllIPRoutes, cmps...); diff != "" {
+					t.Errorf("resolveAutoApprovers() allIPRoutes mismatch (-want +got):\n%s", diff)
+				}
+			} else if gotAllIPRoutes != nil {
+				t.Error("resolveAutoApprovers() expected nil allIPRoutes, got non-nil")
 			}
 		})
 	}

@@ -133,17 +133,17 @@ func testEphemeralWithOptions(t *testing.T, opts ...hsic.Option) {
 	assertNoErrHeadscaleEnv(t, err)
 
 	for _, userName := range spec.Users {
-		err = scenario.CreateUser(userName)
+		user, err := scenario.CreateUser(userName)
 		if err != nil {
 			t.Fatalf("failed to create user %s: %s", userName, err)
 		}
 
-		err = scenario.CreateTailscaleNodesInUser(userName, "all", spec.NodesPerUser, tsic.WithNetwork(scenario.networks[TestDefaultNetwork]))
+		err = scenario.CreateTailscaleNodesInUser(userName, "all", spec.NodesPerUser, tsic.WithNetwork(scenario.networks[scenario.testDefaultNetwork]))
 		if err != nil {
 			t.Fatalf("failed to create tailscale nodes in user %s: %s", userName, err)
 		}
 
-		key, err := scenario.CreatePreAuthKey(userName, true, true)
+		key, err := scenario.CreatePreAuthKey(user.GetId(), true, true)
 		if err != nil {
 			t.Fatalf("failed to create pre-auth key for user %s: %s", userName, err)
 		}
@@ -211,17 +211,17 @@ func TestEphemeral2006DeletedTooQuickly(t *testing.T) {
 	assertNoErrHeadscaleEnv(t, err)
 
 	for _, userName := range spec.Users {
-		err = scenario.CreateUser(userName)
+		user, err := scenario.CreateUser(userName)
 		if err != nil {
 			t.Fatalf("failed to create user %s: %s", userName, err)
 		}
 
-		err = scenario.CreateTailscaleNodesInUser(userName, "all", spec.NodesPerUser, tsic.WithNetwork(scenario.networks[TestDefaultNetwork]))
+		err = scenario.CreateTailscaleNodesInUser(userName, "all", spec.NodesPerUser, tsic.WithNetwork(scenario.networks[scenario.testDefaultNetwork]))
 		if err != nil {
 			t.Fatalf("failed to create tailscale nodes in user %s: %s", userName, err)
 		}
 
-		key, err := scenario.CreatePreAuthKey(userName, true, true)
+		key, err := scenario.CreatePreAuthKey(user.GetId(), true, true)
 		if err != nil {
 			t.Fatalf("failed to create pre-auth key for user %s: %s", userName, err)
 		}

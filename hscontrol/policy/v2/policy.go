@@ -7,6 +7,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/juanfont/headscale/hscontrol/policy/matcher"
+
+	"slices"
+
 	"github.com/juanfont/headscale/hscontrol/types"
 	"go4.org/netipx"
 	"tailscale.com/net/tsaddr"
@@ -22,10 +26,13 @@ type PolicyManager struct {
 
 	filterHash deephash.Sum
 	filter     []tailcfg.FilterRule
+	matchers   []matcher.Match
 
 	tagOwnerMapHash deephash.Sum
 	tagOwnerMap     map[Tag]*netipx.IPSet
 
+	exitSetHash        deephash.Sum
+	exitSet            *netipx.IPSet
 	autoApproveMapHash deephash.Sum
 	autoApproveMap     map[netip.Prefix]*netipx.IPSet
 
@@ -37,7 +44,7 @@ type PolicyManager struct {
 // It returns an error if the policy file is invalid.
 // The policy manager will update the filter rules based on the users and nodes.
 func NewPolicyManager(b []byte, users []types.User, nodes types.Nodes) (*PolicyManager, error) {
-	policy, err := policyFromBytes(b)
+	policy, err := unmarshalPolicy(b)
 	if err != nil {
 		return nil, fmt.Errorf("parsing policy: %w", err)
 	}
@@ -60,15 +67,24 @@ func NewPolicyManager(b []byte, users []types.User, nodes types.Nodes) (*PolicyM
 // updateLocked updates the filter rules based on the current policy and nodes.
 // It must be called with the lock held.
 func (pm *PolicyManager) updateLocked() (bool, error) {
+	// Clear the SSH policy map to ensure it's recalculated with the new policy.
+	// TODO(kradalby): This could potentially be optimized by only clearing the
+	// policies for nodes that have changed. Particularly if the only difference is
+	// that nodes has been added or removed.
+	defer clear(pm.sshPolicyMap)
+
 	filter, err := pm.pol.compileFilterRules(pm.users, pm.nodes)
 	if err != nil {
 		return false, fmt.Errorf("compiling filter rules: %w", err)
 	}
 
 	filterHash := deephash.Hash(&filter)
-	filterChanged := filterHash == pm.filterHash
+	filterChanged := filterHash != pm.filterHash
 	pm.filter = filter
 	pm.filterHash = filterHash
+	if filterChanged {
+		pm.matchers = matcher.MatchesFromFilterRules(pm.filter)
+	}
 
 	// Order matters, tags might be used in autoapprovers, so we need to ensure
 	// that the map for tag owners is resolved before resolving autoapprovers.
@@ -83,7 +99,7 @@ func (pm *PolicyManager) updateLocked() (bool, error) {
 	pm.tagOwnerMap = tagMap
 	pm.tagOwnerMapHash = tagOwnerMapHash
 
-	autoMap, err := resolveAutoApprovers(pm.pol, pm.users, pm.nodes)
+	autoMap, exitSet, err := resolveAutoApprovers(pm.pol, pm.users, pm.nodes)
 	if err != nil {
 		return false, fmt.Errorf("resolving auto approvers map: %w", err)
 	}
@@ -93,16 +109,15 @@ func (pm *PolicyManager) updateLocked() (bool, error) {
 	pm.autoApproveMap = autoMap
 	pm.autoApproveMapHash = autoApproveMapHash
 
+	exitSetHash := deephash.Hash(&autoMap)
+	exitSetChanged := exitSetHash != pm.exitSetHash
+	pm.exitSet = exitSet
+	pm.exitSetHash = exitSetHash
+
 	// If neither of the calculated values changed, no need to update nodes
-	if !filterChanged && !tagOwnerChanged && !autoApproveChanged {
+	if !filterChanged && !tagOwnerChanged && !autoApproveChanged && !exitSetChanged {
 		return false, nil
 	}
-
-	// Clear the SSH policy map to ensure it's recalculated with the new policy.
-	// TODO(kradalby): This could potentially be optimized by only clearing the
-	// policies for nodes that have changed. Particularly if the only difference is
-	// that nodes has been added or removed.
-	clear(pm.sshPolicyMap)
 
 	return true, nil
 }
@@ -129,7 +144,7 @@ func (pm *PolicyManager) SetPolicy(polB []byte) (bool, error) {
 		return false, nil
 	}
 
-	pol, err := policyFromBytes(polB)
+	pol, err := unmarshalPolicy(polB)
 	if err != nil {
 		return false, fmt.Errorf("parsing policy: %w", err)
 	}
@@ -142,15 +157,23 @@ func (pm *PolicyManager) SetPolicy(polB []byte) (bool, error) {
 	return pm.updateLocked()
 }
 
-// Filter returns the current filter rules for the entire tailnet.
-func (pm *PolicyManager) Filter() []tailcfg.FilterRule {
+// Filter returns the current filter rules for the entire tailnet and the associated matchers.
+func (pm *PolicyManager) Filter() ([]tailcfg.FilterRule, []matcher.Match) {
+	if pm == nil {
+		return nil, nil
+	}
+
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	return pm.filter
+	return pm.filter, pm.matchers
 }
 
 // SetUsers updates the users in the policy manager and updates the filter rules.
 func (pm *PolicyManager) SetUsers(users []types.User) (bool, error) {
+	if pm == nil {
+		return false, nil
+	}
+
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.users = users
@@ -159,6 +182,10 @@ func (pm *PolicyManager) SetUsers(users []types.User) (bool, error) {
 
 // SetNodes updates the nodes in the policy manager and updates the filter rules.
 func (pm *PolicyManager) SetNodes(nodes types.Nodes) (bool, error) {
+	if pm == nil {
+		return false, nil
+	}
+
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.nodes = nodes
@@ -174,10 +201,8 @@ func (pm *PolicyManager) NodeCanHaveTag(node *types.Node, tag string) bool {
 	defer pm.mu.Unlock()
 
 	if ips, ok := pm.tagOwnerMap[Tag(tag)]; ok {
-		for _, nodeAddr := range node.IPs() {
-			if ips.Contains(nodeAddr) {
-				return true
-			}
+		if slices.ContainsFunc(node.IPs(), ips.Contains) {
+			return true
 		}
 	}
 
@@ -189,6 +214,23 @@ func (pm *PolicyManager) NodeCanApproveRoute(node *types.Node, route netip.Prefi
 		return false
 	}
 
+	// If the route to-be-approved is an exit route, then we need to check
+	// if the node is in allowed to approve it. This is treated differently
+	// than the auto-approvers, as the auto-approvers are not allowed to
+	// approve the whole /0 range.
+	// However, an auto approver might be /0, meaning that they can approve
+	// all routes available, just not exit nodes.
+	if tsaddr.IsExitRoute(route) {
+		if pm.exitSet == nil {
+			return false
+		}
+		if slices.ContainsFunc(node.IPs(), pm.exitSet.Contains) {
+			return true
+		}
+
+		return false
+	}
+
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -196,10 +238,8 @@ func (pm *PolicyManager) NodeCanApproveRoute(node *types.Node, route netip.Prefi
 	// where there is an exact entry, e.g. 10.0.0.0/8, then
 	// check and return quickly
 	if _, ok := pm.autoApproveMap[route]; ok {
-		for _, nodeAddr := range node.IPs() {
-			if pm.autoApproveMap[route].Contains(nodeAddr) {
-				return true
-			}
+		if slices.ContainsFunc(node.IPs(), pm.autoApproveMap[route].Contains) {
+			return true
 		}
 	}
 
@@ -208,22 +248,12 @@ func (pm *PolicyManager) NodeCanApproveRoute(node *types.Node, route netip.Prefi
 	// cannot just lookup in the prefix map and have to check
 	// if there is a "parent" prefix available.
 	for prefix, approveAddrs := range pm.autoApproveMap {
-		// We do not want the exit node entry to approve all
-		// sorts of routes. The logic here is that it would be
-		// unexpected behaviour to have specific routes approved
-		// just because the node is allowed to designate itself as
-		// an exit.
-		if tsaddr.IsExitRoute(prefix) {
-			continue
-		}
 
 		// Check if prefix is larger (so containing) and then overlaps
 		// the route to see if the node can approve a subset of an autoapprover
 		if prefix.Bits() <= route.Bits() && prefix.Overlaps(route) {
-			for _, nodeAddr := range node.IPs() {
-				if approveAddrs.Contains(nodeAddr) {
-					return true
-				}
+			if slices.ContainsFunc(node.IPs(), approveAddrs.Contains) {
+				return true
 			}
 		}
 	}
@@ -236,6 +266,10 @@ func (pm *PolicyManager) Version() int {
 }
 
 func (pm *PolicyManager) DebugString() string {
+	if pm == nil {
+		return "PolicyManager is not setup"
+	}
+
 	var sb strings.Builder
 
 	fmt.Fprintf(&sb, "PolicyManager (v%d):\n\n", pm.Version())
@@ -278,6 +312,17 @@ func (pm *PolicyManager) DebugString() string {
 			sb.WriteString("\n\n")
 		}
 	}
+
+	sb.WriteString("\n\n")
+	sb.WriteString("Matchers:\n")
+	sb.WriteString("an internal structure used to filter nodes and routes\n")
+	for _, match := range pm.matchers {
+		sb.WriteString(match.DebugString())
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\n\n")
+	sb.WriteString(pm.nodes.DebugString())
 
 	return sb.String()
 }

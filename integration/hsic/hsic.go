@@ -28,6 +28,7 @@ import (
 	"github.com/ory/dockertest/v3/docker"
 	"gopkg.in/yaml.v3"
 	"tailscale.com/tailcfg"
+	"tailscale.com/util/mak"
 )
 
 const (
@@ -70,7 +71,6 @@ type HeadscaleInContainer struct {
 	tlsKey           []byte
 	filesInContainer []fileInContainer
 	postgres         bool
-	policyV2         bool
 	policyMode       types.PolicyMode
 }
 
@@ -188,11 +188,10 @@ func WithPostgres() Option {
 	}
 }
 
-// WithPolicyV2 tells the integration test to use the new v2 filter.
-func WithPolicyV2() Option {
+// WithPolicyV1 tells the integration test to use the old v1 filter.
+func WithPolicyV1() Option {
 	return func(hsic *HeadscaleInContainer) {
-		hsic.policyV2 = true
-		hsic.env["HEADSCALE_EXPERIMENTAL_POLICY_V2"] = "1"
+		hsic.env["HEADSCALE_POLICY_V1"] = "1"
 	}
 }
 
@@ -705,32 +704,38 @@ func (t *HeadscaleInContainer) WaitForRunning() error {
 // CreateUser adds a new user to the Headscale instance.
 func (t *HeadscaleInContainer) CreateUser(
 	user string,
-) error {
-	command := []string{"headscale", "users", "create", user, fmt.Sprintf("--email=%s@test.no", user)}
+) (*v1.User, error) {
+	command := []string{"headscale", "users", "create", user, fmt.Sprintf("--email=%s@test.no", user), "--output", "json"}
 
-	_, _, err := dockertestutil.ExecuteCommand(
+	result, _, err := dockertestutil.ExecuteCommand(
 		t.container,
 		command,
 		[]string{},
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
+	var u v1.User
+	err = json.Unmarshal([]byte(result), &u)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user: %w", err)
+	}
+
+	return &u, nil
 }
 
 // CreateAuthKey creates a new "authorisation key" for a User that can be used
 // to authorise a TailscaleClient with the Headscale instance.
 func (t *HeadscaleInContainer) CreateAuthKey(
-	user string,
+	user uint64,
 	reusable bool,
 	ephemeral bool,
 ) (*v1.PreAuthKey, error) {
 	command := []string{
 		"headscale",
 		"--user",
-		user,
+		strconv.FormatUint(user, 10),
 		"preauthkeys",
 		"create",
 		"--expiration",
@@ -814,6 +819,38 @@ func (t *HeadscaleInContainer) ListNodes(
 	return ret, nil
 }
 
+func (t *HeadscaleInContainer) NodesByUser() (map[string][]*v1.Node, error) {
+	nodes, err := t.ListNodes()
+	if err != nil {
+		return nil, err
+	}
+
+	var userMap map[string][]*v1.Node
+	for _, node := range nodes {
+		if _, ok := userMap[node.User.Name]; !ok {
+			mak.Set(&userMap, node.User.Name, []*v1.Node{node})
+		} else {
+			userMap[node.User.Name] = append(userMap[node.User.Name], node)
+		}
+	}
+
+	return userMap, nil
+}
+
+func (t *HeadscaleInContainer) NodesByName() (map[string]*v1.Node, error) {
+	nodes, err := t.ListNodes()
+	if err != nil {
+		return nil, err
+	}
+
+	var nameMap map[string]*v1.Node
+	for _, node := range nodes {
+		mak.Set(&nameMap, node.GetName(), node)
+	}
+
+	return nameMap, nil
+}
+
 // ListUsers returns a list of users from Headscale.
 func (t *HeadscaleInContainer) ListUsers() ([]*v1.User, error) {
 	command := []string{"headscale", "users", "list", "--output", "json"}
@@ -834,6 +871,22 @@ func (t *HeadscaleInContainer) ListUsers() ([]*v1.User, error) {
 	}
 
 	return users, nil
+}
+
+// MapUsers returns a map of users from Headscale. It is keyed by the
+// user name.
+func (t *HeadscaleInContainer) MapUsers() (map[string]*v1.User, error) {
+	users, err := t.ListUsers()
+	if err != nil {
+		return nil, err
+	}
+
+	var userMap map[string]*v1.User
+	for _, user := range users {
+		mak.Set(&userMap, user.Name, user)
+	}
+
+	return userMap, nil
 }
 
 func (h *HeadscaleInContainer) SetPolicy(pol *policyv1.ACLPolicy) error {
@@ -952,7 +1005,7 @@ func (t *HeadscaleInContainer) ApproveRoutes(id uint64, routes []netip.Prefix) (
 		"headscale", "nodes", "approve-routes",
 		"--output", "json",
 		"--identifier", strconv.FormatUint(id, 10),
-		fmt.Sprintf("--routes=%q", strings.Join(util.PrefixesToString(routes), ",")),
+		fmt.Sprintf("--routes=%s", strings.Join(util.PrefixesToString(routes), ",")),
 	}
 
 	result, _, err := dockertestutil.ExecuteCommand(

@@ -4,6 +4,8 @@
 
 ### BREAKING
 
+#### Routes
+
 Route internals have been rewritten, removing the dedicated route table in the
 database. This was done to simplify the codebase, which had grown unnecessarily
 complex after the routes were split into separate tables. The overhead of having
@@ -14,7 +16,7 @@ this, the CLI and API has been simplified to reflect the changes;
 
 ```console
 $ headscale nodes list-routes
-ID | Hostname           | Approved | Available       | Serving
+ID | Hostname           | Approved | Available       | Serving (Primary)
 1  | ts-head-ruqsg8     |          | 0.0.0.0/0, ::/0 |
 2  | ts-unstable-fq7ob4 |          | 0.0.0.0/0, ::/0 |
 
@@ -22,7 +24,7 @@ $ headscale nodes approve-routes --identifier 1 --routes 0.0.0.0/0,::/0
 Node updated
 
 $ headscale nodes list-routes
-ID | Hostname           | Approved        | Available       | Serving
+ID | Hostname           | Approved        | Available       | Serving (Primary)
 1  | ts-head-ruqsg8     | 0.0.0.0/0, ::/0 | 0.0.0.0/0, ::/0 | 0.0.0.0/0, ::/0
 2  | ts-unstable-fq7ob4 |                 | 0.0.0.0/0, ::/0 |
 ```
@@ -34,15 +36,18 @@ will be approved.
   [#2422](https://github.com/juanfont/headscale/pull/2422)
 - Routes are now managed via the Node API
   [#2422](https://github.com/juanfont/headscale/pull/2422)
+- Only routes accessible to the node will be sent to the node
+  [#2561](https://github.com/juanfont/headscale/pull/2561)
 
-### Experimental Policy v2
+#### Policy v2
 
-This release introduces a new experimental version of Headscales policy
-implementation. In this context, experimental means that the feature is not yet
-fully tested and may contain bugs or unexpected behavior and that we are still
-experimenting with how the final interface/behavior will be.
+This release introduces a new policy implementation. The new policy is a
+complete rewrite, and it introduces some significant quality and consistency
+improvements. In principle, there are not really any new features, but some long
+standing bugs should have been resolved, or be easier to fix in the future. The
+new policy code passes all of our tests.
 
-#### Breaking changes
+**Changes**
 
 - The policy is validated and "resolved" when loading, providing errors for
   invalid rules and conditions.
@@ -59,28 +64,65 @@ experimenting with how the final interface/behavior will be.
     `@` should be appended at the end. For example, if your user is `john`, it
     must be written as `john@` in the policy.
 
-#### Current state
+<details>
+
+<summary>Migration notes when the policy is stored in the database.</summary>
+
+This section **only** applies if the policy is stored in the database.
+
+Headscale won't start with an invalid policy and this also means that the policy
+can't be updated with the CLI. One may migrate a policy stored in the database
+following these steps:
+
+* Dump the policy to a file while still running Headscale 0.25:
+  `headscale policy get > policy.json`
+* Create a dummy policy (here: allow all):
+  `echo '{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}' > dummy.json`
+* Load the dummy policy into Headscale 0.25:
+  `headscale policy set --file dummy.json`
+* Edit `policy.json` and migrate to policy V2
+* Update to Headscale 0.26
+* Load the modified policy V2:
+  `headscale policy set --file policy.json`
+
+</details>
+
+**SSH**
+
+The SSH policy has been reworked to be more consistent with the rest of the
+policy. In addition, several inconsistencies between our implementation and
+Tailscale's upstream has been closed and this might be a breaking change for
+some users. Please refer to the
+[upstream documentation](https://tailscale.com/kb/1337/acl-syntax#tailscale-ssh)
+for more information on which types are allowed in `src`, `dst` and `users`.
+
+There is one large inconsistency left, we allow `*` as a destination as we
+currently do not support `autogroup:self`, `autogroup:member` and
+`autogroup:tagged`. The support for `*` will be removed when we have support for
+the autogroups.
+
+**Current state**
 
 The new policy is passing all tests, both integration and unit tests. This does
 not mean it is perfect, but it is a good start. Corner cases that is currently
 working in v1 and not tested might be broken in v2 (and vice versa).
 
-**We do need help testing this code**, and we think that most of the user facing
-API will not really change. We are not sure yet when this code will replace v1,
-but we are confident that it will, and all new changes and fixes will be made
-towards this code.
+**We do need help testing this code**
 
-The new policy can be used by setting the environment variable
-`HEADSCALE_EXPERIMENTAL_POLICY_V2` to `1`.
-
-#### Other breaking
+#### Other breaking changes
 
 - Disallow `server_url` and `base_domain` to be equal
   [#2544](https://github.com/juanfont/headscale/pull/2544)
+- Return full user in API for pre auth keys instead of string
+  [#2542](https://github.com/juanfont/headscale/pull/2542)
+- Pre auth key API/CLI now uses ID over username
+  [#2542](https://github.com/juanfont/headscale/pull/2542)
 
 ### Changes
 
 - Use Go 1.24 [#2427](https://github.com/juanfont/headscale/pull/2427)
+- Add `headscale policy check` command to check policy
+  [#2553](https://github.com/juanfont/headscale/pull/2553)
 - `oidc.map_legacy_users` and `oidc.strip_email_domain` has been removed
   [#2411](https://github.com/juanfont/headscale/pull/2411)
 - Add more information to `/debug` endpoint
@@ -92,6 +134,8 @@ The new policy can be used by setting the environment variable
   [#2493](https://github.com/juanfont/headscale/pull/2493)
   - If a OIDC provider doesn't include the `email_verified` claim in its ID
     tokens, Headscale will attempt to get it from the UserInfo endpoint.
+- OIDC: Try to populate name, email and username from UserInfo
+  [#2545](https://github.com/juanfont/headscale/pull/2545)
 - Improve performance by only querying relevant nodes from the database for node
   updates [#2509](https://github.com/juanfont/headscale/pull/2509)
 - node FQDNs in the netmap will now contain a dot (".") at the end. This aligns
@@ -99,6 +143,8 @@ The new policy can be used by setting the environment variable
   [#2503](https://github.com/juanfont/headscale/pull/2503)
 - Restore support for "Override local DNS"
   [#2438](https://github.com/juanfont/headscale/pull/2438)
+- Add documentation for routes
+  [#2496](https://github.com/juanfont/headscale/pull/2496)
 
 ## 0.25.1 (2025-02-25)
 
